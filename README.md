@@ -10,25 +10,25 @@ SPDX-FileCopyrightText: 2025 The Linux Foundation
 [![Linux Foundation](https://img.shields.io/badge/Linux-Foundation-blue)](https://linuxfoundation.org/) [![Source Code](https://img.shields.io/badge/GitHub-100000?logo=github&logoColor=white&color=blue)](https://github.com/lfreleng-actions/gha-workflows) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![pre-commit.ci status badge]][pre-commit.ci results page] [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/lfreleng-actions/gha-workflows/badge)](https://scorecard.dev/viewer/?uri=github.com/lfreleng-actions/gha-workflows)
 <!-- prettier-ignore-end -->
 
-Shared, centrally-maintained reusable GitHub Actions workflows for the
-`lfreleng-actions` organisation. Consuming repositories replace their
-per-repository "fat" workflows with a small **thin caller** that
-delegates to a reusable here, so the organisation maintains the pipeline
-logic and security posture in one place.
+Shared, reusable GitHub Actions workflows that projects run from a small
+**thin caller** workflow. A calling repository keeps a short workflow
+that delegates to a reusable workflow here, which helps to keep the
+pipeline logic and security posture consistent across repositories and
+projects.
 
 ## Release reusable workflow
 
 [`.github/workflows/release.yaml`](.github/workflows/release.yaml) is a
 tag-driven (Model A) release workflow. A thin
 `release-action.yaml` caller in each repository runs on tag pushes and
-delegates to it; the reusable validates the pushed tag against the
-organisation's release-gating policy and then promotes the matching
-draft GitHub release. It replaces the ubiquitous per-repository
-`tag-push.yaml`.
+delegates to it; the reusable checks the pushed tag against a
+configurable release-gating policy and then promotes the matching draft
+GitHub release. A caller replaces a per-repository release workflow with
+a single delegating job.
 
-The gates default to the policy proven in `actions-template` and exist
-to prevent faulty, immutable releases — for example a stale fork tag
-pushed months ago, or a tag pointing at an outdated commit:
+The gates default to a policy that prevents faulty, immutable
+releases — for example a stale tag created long ago, or a tag pointing
+at an outdated commit:
 
 <!-- markdownlint-disable MD013 -->
 
@@ -82,7 +82,7 @@ jobs:
   of truth (the release tag replicates from Gerrit to the GitHub mirror
   and fires this tag-push).
 
-All inputs are optional and default to the tested gating policy. See
+All inputs are optional and default to the gating policy above. See
 [`docs/release.md`](docs/release.md) for the full input/output reference
 and the job graph.
 
