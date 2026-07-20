@@ -1,0 +1,66 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Linux Foundation
+
+# =============================================================================
+# EXAMPLE: Gerrit-sourced release caller (thin caller)
+# =============================================================================
+# Copy this file into your project's .github/workflows/ directory as
+# release-action.yaml, replacing the existing "fat" tag-push.yaml. Adjust
+# the `uses:` ref (pin a gha-workflows release SHA) and the optional
+# `with:` overrides to suit your project.
+#
+# Use this form when Gerrit is the source of truth (SCM) for your project.
+#
+# This is Model A: the TAG-DRIVEN release model. Unlike a verify workflow
+# (which gerrit_to_platform dispatches per patchset and votes on), a
+# RELEASE is driven by a tag. For Gerrit projects the release tag is
+# pushed to Gerrit and replicated to the GitHub mirror, where it fires
+# this standard tag-push event. There is no Gerrit change context on a
+# tag, so no votes or comments are cast — this caller is therefore
+# near-identical to the GitHub-native release caller (github.yaml).
+#
+# The two overrides below reflect the Gerrit signing model: the tag
+# signer's key is registered on the Gerrit server, not necessarily on a
+# GitHub account, so require_gerrit is enabled and require_github relaxed.
+# =============================================================================
+name: 'Gerrit Release'
+
+# yamllint disable-line rule:truthy
+on:
+  push:
+    tags:
+      - '**'
+
+permissions: {}
+
+# Serialise repeated runs for the same tag; never cancel an in-flight
+# release promotion.
+concurrency:
+  group: '${{ github.workflow }}-${{ github.ref }}'
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: 'Release'
+    permissions:
+      contents: write  # Draft, then publish, the GitHub release
+    # REPLACE the pinned SHA below with a gha-workflows release SHA.
+    # The all-zero SHA is a non-functional placeholder, NOT a real commit.
+    # yamllint disable-line rule:line-length
+    uses: lfreleng-actions/gha-workflows/.github/workflows/release.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
+    with:
+      # Gerrit signers register keys on the Gerrit server. Verify the key
+      # against Gerrit ('true' auto-detects gerrit.[org].org, or supply a
+      # hostname) and relax the GitHub-account requirement.
+      require_gerrit: 'true'
+      require_github: 'false'
+      # All other inputs are optional; the defaults carry the tested
+      # gating policy. Uncomment and tune only what your project needs.
+      # require_type: 'semver'         # 'semver', 'calver', 'both', 'none'
+      # reject_development: 'true'     # reject alpha/rc/dev/snapshot tags
+      # enforce_increment: 'true'      # block re-release of older versions
+      # require_recent: 'true'         # 'true' (3 min) or a minute count
+      # require_latest: 'true'         # tag must be the default-branch tip
+      # require_branch: ''             # empty = default branch; 'false' off
+      # mark_latest: true              # mark the release as 'latest'

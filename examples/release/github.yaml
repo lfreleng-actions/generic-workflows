@@ -1,0 +1,58 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Linux Foundation
+
+# =============================================================================
+# EXAMPLE: GitHub-native release caller (thin caller)
+# =============================================================================
+# Copy this file into your project's .github/workflows/ directory as
+# release-action.yaml, replacing the existing "fat" tag-push.yaml. Adjust
+# the `uses:` ref (pin a gha-workflows release SHA) and the optional
+# `with:` overrides to suit your project.
+#
+# This is the GitHub-native form: it runs on tag pushes, like a standard
+# GitHub project. For projects where Gerrit is the source of truth, use
+# the gerrit.yaml example in this directory instead.
+#
+# The reusable workflow validates the pushed tag against the release-
+# gating policy (type, signature, increment, branch containment,
+# recency and latest-commit) and then promotes the matching draft
+# release. All gates are enabled by default; override below to tune.
+# =============================================================================
+name: 'Release on Tag Push 🚀'
+
+# yamllint disable-line rule:truthy
+on:
+  push:
+    tags:
+      - '**'
+
+permissions: {}
+
+# Serialise repeated runs for the same tag; never cancel an in-flight
+# release promotion.
+concurrency:
+  group: '${{ github.workflow }}-${{ github.ref }}'
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: 'Release'
+    permissions:
+      contents: write  # Draft, then publish, the GitHub release
+    # REPLACE the pinned SHA below with a gha-workflows release SHA.
+    # The all-zero SHA is a non-functional placeholder, NOT a real commit.
+    # yamllint disable-line rule:line-length
+    uses: lfreleng-actions/gha-workflows/.github/workflows/release.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
+    # All inputs are optional; the defaults carry the tested gating
+    # policy. Uncomment and tune only what your project needs.
+    # with:
+    #   require_type: 'semver'          # 'semver', 'calver', 'both', 'none'
+    #   reject_development: 'true'      # reject alpha/rc/dev/snapshot tags
+    #   enforce_increment: 'true'       # block re-release of older versions
+    #   require_recent: 'true'          # 'true' (3 min) or a minute count
+    #   require_latest: 'true'          # tag must be the default-branch tip
+    #   require_branch: ''              # empty = default branch; 'false' off
+    #   require_signed: 'ssh,gpg-unverifiable'
+    #   require_github: 'true'          # signer key registered on GitHub
+    #   mark_latest: true               # mark the release as 'latest'

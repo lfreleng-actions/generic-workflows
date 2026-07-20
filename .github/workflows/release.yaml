@@ -1,0 +1,395 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Linux Foundation
+
+# Reusable release workflow (Model A, tag-driven).
+#
+# Validates a pushed tag against the organisation's release-gating
+# policy (type/signature/increment/branch/recency/latest-commit) and
+# then promotes the matching draft GitHub release. Consumed by a thin
+# caller workflow that runs on tag pushes; see examples/release/.
+#
+# There is no Gerrit change context on a tag, so this workflow casts no
+# votes/comments: the Gerrit and GitHub-native callers are near
+# identical. The Gerrit inputs exist for the shared dual-checkout
+# convention and are empty for a normal tag push.
+name: '[R] Release on Tag Push 🚀'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_call:
+    inputs:
+      repository:
+        description: 'Repository (org/repo) to operate on; defaults to caller'
+        required: false
+        type: string
+        default: ''
+      ref:
+        description: 'Git ref to check out; empty uses the triggering tag'
+        required: false
+        type: string
+        default: ''
+
+      # --- Tag validation gates (tag-validate-action) ---
+      require_type:
+        description: "Required tag type: 'semver', 'calver', 'both' or 'none'"
+        required: false
+        type: string
+        default: 'semver'
+      require_signed:
+        description: >-
+          Signature requirement (comma-separated), e.g.
+          'ssh,gpg-unverifiable'. Empty disables the check.
+        required: false
+        type: string
+        default: 'ssh,gpg-unverifiable'
+      require_github:
+        description: 'Require the signing key be registered on a GitHub account'
+        required: false
+        type: string
+        default: 'true'
+      require_gerrit:
+        description: >-
+          Require the signing key be registered on a Gerrit account.
+          'true' auto-detects the server (gerrit.[org].org) or supply a
+          hostname. Empty/'false' disables. Use for Gerrit-mirrored
+          projects whose signers are not on GitHub.
+        required: false
+        type: string
+        default: 'false'
+      require_owner:
+        description: >-
+          Restrict the signing key owner to the given GitHub
+          username(s)/email(s) (comma/space-separated). Implies
+          require_github.
+        required: false
+        type: string
+        default: ''
+      reject_development:
+        description: 'Reject pre-release/development tags (alpha, rc, dev, …)'
+        required: false
+        type: string
+        default: 'true'
+      enforce_increment:
+        description: >-
+          Require the tag to exceed the highest existing comparable tag;
+          blocks re-release of older versions (e.g. stale fork tags).
+        required: false
+        type: string
+        default: 'true'
+      require_branch:
+        description: >-
+          Require the tag commit to be reachable from this branch. Empty
+          uses the repository default branch; 'false' disables the check.
+        required: false
+        type: string
+        default: ''
+      require_recent:
+        description: >-
+          Require the tag to have been created recently. 'true' uses the
+          default 3-minute window, or supply a number of minutes; 'false'
+          disables. Needs an annotated/signed tag (lightweight tags fail).
+        required: false
+        type: string
+        default: 'true'
+      require_latest:
+        description: >-
+          Require the tag to point at the current tip of the target
+          branch; blocks releases built from outdated commits. 'false'
+          disables.
+        required: false
+        type: string
+        default: 'true'
+
+      # --- Release promotion ---
+      mark_latest:
+        description: "Mark the promoted release as the repository's 'latest'"
+        required: false
+        type: boolean
+        default: true
+
+      # --- Harden-runner egress ---
+      harden_runner_egress:
+        description: "Harden-runner egress policy: 'block' or 'audit'"
+        required: false
+        type: string
+        default: 'block'
+      harden_runner_allowlist:
+        description: 'Out-of-band harden-runner allow-list configuration'
+        required: false
+        type: string
+        # yamllint disable-line rule:line-length
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@18d9c4446bea555d0783e850f6d295f844fe8f67'  # v0.1.1
+
+      # --- Gerrit-aware checkout (empty unless dispatched via Gerrit) ---
+      gerrit_refspec:
+        description: 'Gerrit refspec of the change under test'
+        required: false
+        type: string
+        default: ''
+      gerrit_project:
+        description: 'Gerrit project name'
+        required: false
+        type: string
+        default: ''
+      gerrit_branch:
+        description: 'Gerrit target branch'
+        required: false
+        type: string
+        default: ''
+      gerrit_url:
+        description: >-
+          Gerrit server URL. Empty falls back to the GERRIT_URL
+          repository variable at runtime.
+        required: false
+        type: string
+        default: ''
+
+    outputs:
+      tag:
+        description: 'Validated release tag/version string'
+        value: ${{ jobs.tag-validate.outputs.tag }}
+      release_url:
+        description: 'URL of the promoted GitHub release'
+        value: ${{ jobs.promote-release.outputs.release_url }}
+
+permissions: {}
+
+# Serialise repeated runs for the same tag; never cancel an in-flight
+# release promotion. Distinct tags use distinct groups and proceed
+# independently.
+concurrency:
+  group: '${{ github.workflow }}-${{ github.ref }}'
+  cancel-in-progress: false
+
+jobs:
+  gerrit-validate:
+    name: 'Validate Gerrit Inputs'
+    # Always runs (only the step is conditional) so gating dependents on
+    # it never trips GitHub's "skipped need skips dependents" behaviour.
+    runs-on: 'ubuntu-latest'
+    permissions: {}
+    timeout-minutes: 2
+    steps:
+      - name: 'Require Gerrit project, branch and URL'
+        if: inputs.gerrit_refspec != ''
+        shell: bash
+        env:
+          GERRIT_PROJECT: ${{ inputs.gerrit_project }}
+          GERRIT_BRANCH: ${{ inputs.gerrit_branch }}
+          # yamllint disable-line rule:line-length
+          GERRIT_URL: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+        run: |
+          # gerrit_refspec is set, so the Gerrit checkout path runs and
+          # also requires gerrit_project, gerrit_branch and a resolvable
+          # Gerrit URL (the gerrit_url input or the GERRIT_URL variable).
+          missing=''
+          if [ -z "${GERRIT_PROJECT}" ]; then
+            missing="${missing} gerrit_project"
+          fi
+          if [ -z "${GERRIT_BRANCH}" ]; then
+            missing="${missing} gerrit_branch"
+          fi
+          if [ -z "${GERRIT_URL}" ]; then
+            missing="${missing} gerrit_url/GERRIT_URL"
+          fi
+          if [ -n "${missing}" ]; then
+            echo "::error::gerrit_refspec is set but missing:${missing}"
+            exit 1
+          fi
+          echo "Gerrit inputs validated ✅"
+
+  tag-validate:
+    name: 'Validate Tag'
+    needs: gerrit-validate
+    # Skip tag deletion events.
+    if: ${{ !github.event.deleted }}
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: write  # Draft the release when one does not yet exist
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.tag-validate.outputs.tag_name }}
+    steps:
+      - name: 'Load egress allow-list (block mode)'
+        if: inputs.harden_runner_egress != 'audit'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+      - name: 'Harden runner (block)'
+        if: inputs.harden_runner_egress != 'audit'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920  # v2.20.0
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      - name: 'Harden runner (audit)'
+        if: inputs.harden_runner_egress == 'audit'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920  # v2.20.0
+        with:
+          egress-policy: 'audit'
+
+      - name: 'Checkout Gerrit change'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@f87b90a3370e62dad310797fedc7fd3700c75832  # v1.0.2
+        with:
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          ref: refs/heads/${{ inputs.gerrit_branch }}
+      - name: 'Checkout repository'
+        if: inputs.gerrit_refspec == ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: 'Verify pushed tag'
+        id: 'tag-validate'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/tag-validate-action@aeca49ae6d1e87184477d803d30c4fa68777d814  # v1.1.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          require_type: ${{ inputs.require_type }}
+          require_signed: ${{ inputs.require_signed }}
+          require_github: ${{ inputs.require_github }}
+          require_gerrit: ${{ inputs.require_gerrit }}
+          require_owner: ${{ inputs.require_owner }}
+          reject_development: ${{ inputs.reject_development }}
+          enforce_increment: ${{ inputs.enforce_increment }}
+          # Empty require_branch falls back to the repository default
+          # branch, matching the tested actions-template default.
+          # yamllint disable-line rule:line-length
+          require_branch: ${{ inputs.require_branch != '' && inputs.require_branch || github.event.repository.default_branch }}
+          require_recent: ${{ inputs.require_recent }}
+          require_latest: ${{ inputs.require_latest }}
+
+      - name: 'Ensure draft release exists'
+        id: 'ensure-release'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag-validate.outputs.tag_name }}
+        run: |
+          # A draft release must exist so promote-release can publish it.
+          # If a PUBLISHED release already exists, fail rather than risk a
+          # duplicate/immutable release from a mistaken re-run.
+          if RELEASE_INFO=$(gh release view "${TAG}" \
+            --json isDraft 2>/dev/null); then
+            IS_DRAFT=$(echo "${RELEASE_INFO}" | jq -r '.isDraft')
+            if [ "${IS_DRAFT}" = "true" ]; then
+              echo "Draft release for tag ${TAG} already exists"
+            else
+              echo "::error::A published release already exists for ${TAG};" \
+                "delete or recreate it as a draft, then re-run."
+              exit 1
+            fi
+          else
+            echo "Creating draft release for tag ${TAG}"
+            gh release create "${TAG}" \
+              --draft \
+              --title "Release ${TAG}" \
+              --notes "Automated release for ${TAG}"
+          fi
+
+  promote-release:
+    name: 'Promote Draft Release'
+    needs:
+      - 'tag-validate'
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: write  # IMPORTANT: needed to publish the draft release
+    timeout-minutes: 5
+    outputs:
+      # yamllint disable-line rule:line-length
+      release_url: ${{ steps.promote-release.outputs.release_url || steps.set-promoted-url.outputs.release_url }}
+    steps:
+      - name: 'Load egress allow-list (block mode)'
+        if: inputs.harden_runner_egress != 'audit'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+      - name: 'Harden runner (block)'
+        if: inputs.harden_runner_egress != 'audit'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920  # v2.20.0
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      - name: 'Harden runner (audit)'
+        if: inputs.harden_runner_egress == 'audit'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920  # v2.20.0
+        with:
+          egress-policy: 'audit'
+
+      - name: 'Checkout Gerrit change'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@f87b90a3370e62dad310797fedc7fd3700c75832  # v1.0.2
+        with:
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          ref: refs/heads/${{ inputs.gerrit_branch }}
+      - name: 'Checkout repository'
+        if: inputs.gerrit_refspec == ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: 'Check if release is already promoted'
+        id: 'check-promoted'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.tag-validate.outputs.tag }}
+        run: |
+          # Idempotency: a re-run after a successful promotion must not
+          # fail. Treat an already-published release as success.
+          if gh release view "${TAG}" --json isDraft --jq '.isDraft' \
+              2>/dev/null | grep -q "false"; then
+            echo "Release ${TAG} is already promoted, skipping promotion"
+            echo "already_promoted=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "Release ${TAG} is draft or missing, proceeding with promotion"
+            echo "already_promoted=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: 'Promote draft release'
+        id: 'promote-release'
+        if: steps.check-promoted.outputs.already_promoted == 'false'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/draft-release-promote-action@072990900b99030363d81d4131c2bf2855f07df0  # v0.1.4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ needs.tag-validate.outputs.tag }}
+          latest: ${{ inputs.mark_latest }}
+
+      - name: 'Set release URL for already-promoted release'
+        id: 'set-promoted-url'
+        if: steps.check-promoted.outputs.already_promoted == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.tag-validate.outputs.tag }}
+        run: |
+          RELEASE_URL=$(gh release view "${TAG}" --json url --jq '.url')
+          echo "release_url=${RELEASE_URL}" >> "${GITHUB_OUTPUT}"
