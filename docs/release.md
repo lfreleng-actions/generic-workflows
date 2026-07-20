@@ -1,6 +1,6 @@
 <!--
 SPDX-License-Identifier: Apache-2.0
-SPDX-FileCopyrightText: 2025 The Linux Foundation
+SPDX-FileCopyrightText: 2026 The Linux Foundation
 -->
 
 <!-- markdownlint-disable MD013 -->
@@ -36,10 +36,13 @@ gerrit-validate -> tag-validate -> promote-release
    Idempotent: a re-run after a successful promotion treats the
    already-published release as success.
 
-Every job runs the harden-runner triple (block-mode allow-list load +
-harden-runner block, or harden-runner audit when
-`harden_runner_egress: 'audit'`), pins every `uses:` to a full commit
-SHA, and never interpolates `${{ }}` into `run:` blocks.
+The two jobs that check out the repository (`tag-validate` and
+`promote-release`) run the harden-runner triple (block-mode allow-list
+load + harden-runner block, or harden-runner audit when
+`harden_runner_egress: 'audit'`), pin every `uses:` to a full commit
+SHA, and never interpolate `${{ }}` into `run:` blocks. The
+`gerrit-validate` job performs input checks and makes no network calls,
+and needs no egress hardening.
 
 ## Release gates
 
@@ -70,7 +73,6 @@ tag pushed months ago, or a tag pointing at an outdated commit.
 
 | Input                                                                | Default               | Purpose                                                                                       |
 | -------------------------------------------------------------------- | --------------------- | --------------------------------------------------------------------------------------------- |
-| `repository`                                                         | `''` (caller)         | Repository (`org/repo`) to operate on                                                         |
 | `ref`                                                                | `''` (triggering tag) | Git ref to check out                                                                          |
 | `mark_latest`                                                        | `true`                | Mark the promoted release as the repository's `latest`                                        |
 | `harden_runner_egress`                                               | `block`               | `block` or `audit`                                                                            |

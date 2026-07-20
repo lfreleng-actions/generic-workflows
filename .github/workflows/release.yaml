@@ -1,6 +1,6 @@
 ---
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: 2025 The Linux Foundation
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
 
 # Reusable release workflow (Model A, tag-driven).
 #
@@ -19,13 +19,10 @@ name: '[R] Release on Tag Push 🚀'
 on:
   workflow_call:
     inputs:
-      repository:
-        description: 'Repository (org/repo) to operate on; defaults to caller'
-        required: false
-        type: string
-        default: ''
       ref:
-        description: 'Git ref to check out; empty uses the triggering tag'
+        description: >-
+          Git ref to check out; empty resolves to github.ref (the
+          triggering tag on a tag push).
         required: false
         type: string
         default: ''
@@ -119,7 +116,7 @@ on:
         required: false
         type: string
         # yamllint disable-line rule:line-length
-        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@18d9c4446bea555d0783e850f6d295f844fe8f67'  # v0.1.1
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@aa81113fe43792f29f939c79ea47a04801cf5342'  # v0.4.1
 
       # --- Gerrit-aware checkout (empty unless dispatched via Gerrit) ---
       gerrit_refspec:
@@ -165,8 +162,10 @@ concurrency:
 jobs:
   gerrit-validate:
     name: 'Validate Gerrit Inputs'
-    # Always runs (only the step is conditional) so gating dependents on
-    # it never trips GitHub's "skipped need skips dependents" behaviour.
+    # Skip tag deletion events (matches tag-validate); on a normal push
+    # this runs and its dependents proceed. Only the inner step is
+    # further gated on gerrit_refspec.
+    if: ${{ !github.event.deleted }}
     runs-on: 'ubuntu-latest'
     permissions: {}
     timeout-minutes: 2
@@ -248,8 +247,7 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
-          repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref }}
+          ref: ${{ inputs.ref != '' && inputs.ref || github.ref }}
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false
@@ -282,17 +280,17 @@ jobs:
           TAG: ${{ steps.tag-validate.outputs.tag_name }}
         run: |
           # A draft release must exist so promote-release can publish it.
-          # If a PUBLISHED release already exists, fail rather than risk a
-          # duplicate/immutable release from a mistaken re-run.
+          # An already-PUBLISHED release is not an error: the gates above
+          # have passed, and promote-release detects the published state
+          # and treats promotion as an idempotent no-op (safe re-runs).
           if RELEASE_INFO=$(gh release view "${TAG}" \
             --json isDraft 2>/dev/null); then
             IS_DRAFT=$(echo "${RELEASE_INFO}" | jq -r '.isDraft')
             if [ "${IS_DRAFT}" = "true" ]; then
               echo "Draft release for tag ${TAG} already exists"
             else
-              echo "::error::A published release already exists for ${TAG};" \
-                "delete or recreate it as a draft, then re-run."
-              exit 1
+              echo "Release ${TAG} already published; promotion will" \
+                "treat this as an idempotent no-op."
             fi
           else
             echo "Creating draft release for tag ${TAG}"
@@ -351,8 +349,7 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
-          repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref }}
+          ref: ${{ inputs.ref != '' && inputs.ref || github.ref }}
           persist-credentials: false
 
       - name: 'Check if release is already promoted'
@@ -363,13 +360,20 @@ jobs:
           TAG: ${{ needs.tag-validate.outputs.tag }}
         run: |
           # Idempotency: a re-run after a successful promotion must not
-          # fail. Treat an already-published release as success.
-          if gh release view "${TAG}" --json isDraft --jq '.isDraft' \
-              2>/dev/null | grep -q "false"; then
+          # fail. ensure-draft-release guarantees a release exists (draft
+          # or already published), so fail loudly on an API error rather
+          # than masking it as "missing"; branch only on explicit isDraft.
+          if ! RELEASE_JSON=$(gh release view "${TAG}" \
+              --json isDraft 2>&1); then
+            echo "::error::Unable to query release ${TAG}: ${RELEASE_JSON}"
+            exit 1
+          fi
+          IS_DRAFT=$(echo "${RELEASE_JSON}" | jq -r '.isDraft')
+          if [ "${IS_DRAFT}" = "false" ]; then
             echo "Release ${TAG} is already promoted, skipping promotion"
             echo "already_promoted=true" >> "${GITHUB_OUTPUT}"
           else
-            echo "Release ${TAG} is draft or missing, proceeding with promotion"
+            echo "Release ${TAG} is draft, proceeding with promotion"
             echo "already_promoted=false" >> "${GITHUB_OUTPUT}"
           fi
 
