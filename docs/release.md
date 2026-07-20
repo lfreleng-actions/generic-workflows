@@ -1,0 +1,129 @@
+<!--
+SPDX-License-Identifier: Apache-2.0
+SPDX-FileCopyrightText: 2025 The Linux Foundation
+-->
+
+<!-- markdownlint-disable MD013 -->
+
+# Release reusable workflow
+
+`.github/workflows/release.yaml` is a reusable release workflow (Model A,
+tag-driven). A thin caller in each consuming repository runs on tag
+pushes and delegates to it. The reusable validates the pushed tag
+against the organisation's release-gating policy and then promotes the
+matching draft GitHub release.
+
+This replaces the per-repository "fat" `tag-push.yaml` with a single,
+centrally-maintained reusable and a small `release-action.yaml` caller.
+
+## What it does
+
+```text
+gerrit-validate -> tag-validate -> promote-release
+```
+
+1. `gerrit-validate` — checks the Gerrit input contract. This job
+   always runs; a conditional step handles the check, so `needs:`
+   chains never get skip-propagated. A normal tag push (no Gerrit
+   inputs) makes this job a no-op.
+2. `tag-validate` — checks out the repository with full history and
+   tags, then runs
+   [`tag-validate-action`](https://github.com/lfreleng-actions/tag-validate-action)
+   against every configured gate. On success it ensures a draft release
+   exists (creating one if necessary), so promotion can proceed.
+3. `promote-release` — publishes the draft release via
+   [`draft-release-promote-action`](https://github.com/lfreleng-actions/draft-release-promote-action).
+   Idempotent: a re-run after a successful promotion treats the
+   already-published release as success.
+
+Every job runs the harden-runner triple (block-mode allow-list load +
+harden-runner block, or harden-runner audit when
+`harden_runner_egress: 'audit'`), pins every `uses:` to a full commit
+SHA, and never interpolates `${{ }}` into `run:` blocks.
+
+## Release gates
+
+The gates below default to the policy proven in `actions-template`. They
+exist to prevent faulty, immutable releases — for example a stale fork
+tag pushed months ago, or a tag pointing at an outdated commit.
+
+<!-- markdownlint-disable MD013 -->
+
+| Gate               | Input                | Default                | Effect                                                                                                                      |
+| ------------------ | -------------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Version scheme     | `require_type`       | `semver`               | Tag must match `semver`, `calver`, `both`, or `none` to disable                                                             |
+| Signature          | `require_signed`     | `ssh,gpg-unverifiable` | Tag must carry an accepted signature; empty disables                                                                        |
+| GitHub key         | `require_github`     | `true`                 | Signing key registered on a GitHub account                                                                                  |
+| Gerrit key         | `require_gerrit`     | `false`                | Signing key registered on Gerrit (`true` auto-detects the server, or supply a hostname)                                     |
+| Key owner          | `require_owner`      | `''`                   | Restrict signer to given GitHub username(s)/email(s); implies `require_github`                                              |
+| No pre-release     | `reject_development` | `true`                 | Reject alpha/rc/dev/snapshot tags                                                                                           |
+| Increment          | `enforce_increment`  | `true`                 | Tag must exceed the highest existing comparable tag                                                                         |
+| Branch containment | `require_branch`     | `''`                   | Tag commit must be reachable from this branch; empty uses the default branch, `false` disables                              |
+| Recency            | `require_recent`     | `true`                 | Tag must be recent; `true` is a 3-minute window, or supply a minute count, `false` disables (needs an annotated/signed tag) |
+| Latest commit      | `require_latest`     | `true`                 | Tag must point at the current tip of the target branch                                                                      |
+
+<!-- markdownlint-enable MD013 -->
+
+## Other inputs
+
+<!-- markdownlint-disable MD013 -->
+
+| Input                                                                | Default               | Purpose                                                                                       |
+| -------------------------------------------------------------------- | --------------------- | --------------------------------------------------------------------------------------------- |
+| `repository`                                                         | `''` (caller)         | Repository (`org/repo`) to operate on                                                         |
+| `ref`                                                                | `''` (triggering tag) | Git ref to check out                                                                          |
+| `mark_latest`                                                        | `true`                | Mark the promoted release as the repository's `latest`                                        |
+| `harden_runner_egress`                                               | `block`               | `block` or `audit`                                                                            |
+| `harden_runner_allowlist`                                            | central org list      | Out-of-band harden-runner allow-list configuration                                            |
+| `gerrit_refspec` / `gerrit_project` / `gerrit_branch` / `gerrit_url` | `''`                  | Gerrit-aware checkout inputs; `gerrit_url` falls back to the `GERRIT_URL` repository variable |
+
+<!-- markdownlint-enable MD013 -->
+
+## Outputs
+
+| Output        | Description                          |
+| ------------- | ------------------------------------ |
+| `tag`         | Validated release tag/version string |
+| `release_url` | URL of the promoted GitHub release   |
+
+## Thin caller usage
+
+Copy the appropriate example from `examples/release/` into your
+project's `.github/workflows/` directory as `release-action.yaml` and
+pin the `uses:` ref to a `gha-workflows` release SHA.
+
+Minimal GitHub-native caller:
+
+```yaml
+---
+name: 'Release on Tag Push 🚀'
+
+# yamllint disable-line rule:truthy
+on:
+  push:
+    tags:
+      - '**'
+
+permissions: {}
+
+concurrency:
+  group: '${{ github.workflow }}-${{ github.ref }}'
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: 'Release'
+    permissions:
+      contents: write
+    # Pin a real gha-workflows release SHA in place of <SHA>.
+    uses: lfreleng-actions/gha-workflows/.github/workflows/release.yaml@<SHA>
+```
+
+- `examples/release/github.yaml` — GitHub-native projects.
+- `examples/release/gerrit.yaml` — projects where Gerrit is the source
+  of truth. The release tag replicates from Gerrit to the GitHub
+  mirror, where it fires this tag-push; the caller sets
+  `require_gerrit: 'true'` and `require_github: 'false'` because signer
+  keys live on Gerrit.
+
+All inputs are optional; the defaults carry the tested gating policy.
