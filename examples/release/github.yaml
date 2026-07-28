@@ -7,7 +7,7 @@
 # =============================================================================
 # Copy this file into your project's .github/workflows/ directory as
 # release-action.yaml, replacing the existing "fat" tag-push.yaml. Adjust
-# the `uses:` ref (pin a gha-workflows release SHA) and the optional
+# the `uses:` ref (pin a generic-workflows release SHA) and the optional
 # `with:` overrides to suit your project.
 #
 # This is the GitHub-native form: it runs on tag pushes, like a standard
@@ -40,10 +40,10 @@ jobs:
     name: 'Release'
     permissions:
       contents: write  # Draft, then publish, the GitHub release
-    # REPLACE the pinned SHA below with a gha-workflows release SHA.
+    # REPLACE the pinned SHA below with a generic-workflows release SHA.
     # The all-zero SHA is a non-functional placeholder, NOT a real commit.
     # yamllint disable-line rule:line-length
-    uses: lfreleng-actions/gha-workflows/.github/workflows/release.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
+    uses: lfreleng-actions/generic-workflows/.github/workflows/release.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
     # All inputs are optional; the defaults carry the tested gating
     # policy. Uncomment and tune only what your project needs.
     # with:

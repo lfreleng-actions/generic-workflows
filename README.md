@@ -3,11 +3,11 @@ SPDX-License-Identifier: Apache-2.0
 SPDX-FileCopyrightText: 2025 The Linux Foundation
 -->
 
-# 🚀 gha-workflows
+# 🚀 generic-workflows
 
 <!-- prettier-ignore-start -->
 <!-- markdownlint-disable-next-line MD013 -->
-[![Linux Foundation](https://img.shields.io/badge/Linux-Foundation-blue)](https://linuxfoundation.org/) [![Source Code](https://img.shields.io/badge/GitHub-100000?logo=github&logoColor=white&color=blue)](https://github.com/lfreleng-actions/gha-workflows) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![pre-commit.ci status badge]][pre-commit.ci results page] [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/lfreleng-actions/gha-workflows/badge)](https://scorecard.dev/viewer/?uri=github.com/lfreleng-actions/gha-workflows)
+[![Linux Foundation](https://img.shields.io/badge/Linux-Foundation-blue)](https://linuxfoundation.org/) [![Source Code](https://img.shields.io/badge/GitHub-100000?logo=github&logoColor=white&color=blue)](https://github.com/lfreleng-actions/generic-workflows) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![pre-commit.ci status badge]][pre-commit.ci results page] [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/lfreleng-actions/generic-workflows/badge)](https://scorecard.dev/viewer/?uri=github.com/lfreleng-actions/generic-workflows)
 <!-- prettier-ignore-end -->
 
 Shared, reusable GitHub Actions workflows that projects run from a small
@@ -50,7 +50,7 @@ at an outdated commit:
 Copy the appropriate caller from
 [`examples/release/`](examples/release/) into your project's
 `.github/workflows/` directory as `release-action.yaml` and pin the
-`uses:` ref to a `gha-workflows` release SHA:
+`uses:` ref to a `generic-workflows` release SHA:
 
 ```yaml
 ---
@@ -73,8 +73,8 @@ jobs:
     name: 'Release'
     permissions:
       contents: write
-    # Pin a real gha-workflows release SHA in place of <SHA>.
-    uses: lfreleng-actions/gha-workflows/.github/workflows/release.yaml@<SHA>
+    # Pin a real generic-workflows release SHA in place of <SHA>.
+    uses: lfreleng-actions/generic-workflows/.github/workflows/release.yaml@<SHA>
 ```
 
 - `examples/release/github.yaml` — GitHub-native projects.
@@ -91,7 +91,7 @@ and the job graph.
 > **Note:** This repository started as a copy of `workflows-template`
 > and still carries its generic pipeline skeletons
 > (`build-test.yaml`, `build-test-release.yaml`, `merge.yaml`) and their
-> examples. Whether `gha-workflows` should keep these or become a
+> examples. Whether `generic-workflows` should keep these or become a
 > dedicated release-workflow repository is a decision left to
 > maintainers. The material below documents the inherited skeletons.
 
@@ -126,5 +126,5 @@ See [`docs/release.md`](docs/release.md) for the release reusable
 workflow, and [`docs/BRIEF.md`](docs/BRIEF.md) for the inherited
 skeleton design decisions.
 
-[pre-commit.ci results page]: https://results.pre-commit.ci/latest/github/lfreleng-actions/gha-workflows/main
-[pre-commit.ci status badge]: https://results.pre-commit.ci/badge/github/lfreleng-actions/gha-workflows/main.svg
+[pre-commit.ci results page]: https://results.pre-commit.ci/latest/github/lfreleng-actions/generic-workflows/main
+[pre-commit.ci status badge]: https://results.pre-commit.ci/badge/github/lfreleng-actions/generic-workflows/main.svg
