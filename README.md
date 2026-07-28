@@ -86,31 +86,6 @@ All inputs are optional and default to the gating policy above. See
 [`docs/release.md`](docs/release.md) for the full input/output reference
 and the job graph.
 
-## Inherited template skeletons
-
-> **Note:** This repository started as a copy of `workflows-template`
-> and still carries its generic pipeline skeletons
-> (`build-test.yaml`, `build-test-release.yaml`, `merge.yaml`) and their
-> examples. Whether `generic-workflows` should keep these or become a
-> dedicated release-workflow repository is a decision left to
-> maintainers. The material below documents the inherited skeletons.
-
-<!-- markdownlint-disable MD013 -->
-
-| Workflow                                    | Purpose                                                                                                                         | Trigger style        |
-| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
-| `.github/workflows/build-test.yaml`         | Build, test, audit, SBOM and Grype scan skeleton                                                                                | Pull request         |
-| `.github/workflows/build-test-release.yaml` | Release skeleton (Model A, tag-driven): tag validation, release artefact attachment and draft-release promotion                 | Tag push             |
-| `.github/workflows/merge.yaml`              | Merge/publish skeleton (Model B, merge-driven): snapshot publish on every merge plus `releases/` file-triggered release publish | Merge / push to main |
-
-<!-- markdownlint-enable MD013 -->
-
-These skeletons carry `# TEMPLATE:`-marked placeholder steps that
-instantiators replace with real language actions. `python-workflows` is
-the language-specific reference implementation of these patterns. See
-[`docs/BRIEF.md`](docs/BRIEF.md) for the skeleton design decisions and
-the instantiation checklist.
-
 ## Gerrit support
 
 The reusable workflows are Gerrit-aware: when a caller sets the
@@ -123,8 +98,7 @@ release callers stay near-identical.
 ## Design
 
 See [`docs/release.md`](docs/release.md) for the release reusable
-workflow, and [`docs/BRIEF.md`](docs/BRIEF.md) for the inherited
-skeleton design decisions.
+workflow's full input/output reference and job graph.
 
 [pre-commit.ci results page]: https://results.pre-commit.ci/latest/github/lfreleng-actions/generic-workflows/main
 [pre-commit.ci status badge]: https://results.pre-commit.ci/badge/github/lfreleng-actions/generic-workflows/main.svg
