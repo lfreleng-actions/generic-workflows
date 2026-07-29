@@ -155,8 +155,19 @@ permissions: {}
 # Serialise repeated runs for the same tag; never cancel an in-flight
 # release promotion. Distinct tags use distinct groups and proceed
 # independently.
+#
+# The group MUST NOT be derived from github.workflow. Inside a called
+# workflow that context resolves to the CALLER's workflow name, so a
+# caller carrying the documented
+# '${{ github.workflow }}-${{ github.ref }}' group would compute the
+# identical string here. The caller holds that group while it waits for
+# this workflow, which can then never acquire it, and GitHub cancels the
+# run with "a deadlock was detected for concurrency group". A literal,
+# workflow-specific prefix keeps the serialisation guarantee for callers
+# that declare no concurrency of their own, without colliding with the
+# caller's group.
 concurrency:
-  group: '${{ github.workflow }}-${{ github.ref }}'
+  group: 'generic-workflows-release-${{ github.ref }}'
   cancel-in-progress: false
 
 jobs:

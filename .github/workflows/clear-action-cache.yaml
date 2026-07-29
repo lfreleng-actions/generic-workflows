@@ -49,8 +49,14 @@ on:
 
 permissions: {}
 
+# Serialise cache housekeeping; never cancel an in-flight deletion pass.
+#
+# The group MUST NOT be derived from github.workflow: inside a called
+# workflow that context resolves to the CALLER's workflow name, so a
+# caller declaring the same group would deadlock against this one. A
+# literal, workflow-specific group avoids that collision.
 concurrency:
-  group: ${{ github.workflow }}
+  group: 'generic-workflows-clear-action-cache'
   cancel-in-progress: false
 
 jobs:

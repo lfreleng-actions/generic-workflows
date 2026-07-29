@@ -128,4 +128,12 @@ jobs:
   `require_gerrit: 'true'` and `require_github: 'false'` because signer
   keys live on Gerrit.
 
+The caller owns the `${{ github.workflow }}`-derived concurrency group
+shown above. The reusable declares its own group under a distinct
+literal prefix, because `github.workflow` resolves to the *caller's*
+workflow name inside a called workflow: reusing that expression on both
+sides produces one shared group that the caller holds while waiting for
+the callee, which GitHub cancels as a concurrency deadlock. Keep the
+caller's group as shown, or omit it entirely.
+
 All inputs are optional; the defaults carry the tested gating policy.
