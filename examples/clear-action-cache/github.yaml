@@ -1,0 +1,63 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# =============================================================================
+# EXAMPLE: caller for the reusable clear-action-cache workflow
+# =============================================================================
+# Copy this file into your project's .github/workflows/ directory as
+# clear-action-cache-action.yaml and pin the `uses:` ref to a
+# generic-workflows release SHA.
+#
+# Cache housekeeping is a deliberate, occasional act, so this caller is
+# dispatch-only: nothing here runs on push or pull request. The three
+# inputs are surfaced in the "Run workflow" form and passed straight
+# through.
+#
+# The reusable workflow needs `actions: write` to list and delete caches.
+# A called workflow cannot hold more permission than its caller, so the
+# grant is declared on the calling job below.
+# =============================================================================
+name: 'Clear Action Cache'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_dispatch:
+    inputs:
+      key_pattern:
+        description: >-
+          Optional substring filter applied to cache keys. Leave
+          empty to remove every cache entry.
+        required: false
+        default: ''
+        type: string
+      ref_filter:
+        description: >-
+          Optional git ref to limit deletion to (e.g.
+          'refs/heads/main' or 'refs/pull/42/merge'). Leave empty
+          to ignore the ref attribute.
+        required: false
+        default: ''
+        type: string
+      dry_run:
+        description: >-
+          When true, list matching entries but do not delete them.
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+jobs:
+  clear-action-cache:
+    name: 'Clear Action Cache'
+    permissions:
+      actions: write  # list and delete repository Actions caches
+    # REPLACE the pinned SHA below with a generic-workflows release SHA.
+    # The all-zero SHA is a non-functional placeholder, NOT a real commit.
+    # yamllint disable-line rule:line-length
+    uses: lfreleng-actions/generic-workflows/.github/workflows/clear-action-cache.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
+    with:
+      key_pattern: ${{ inputs.key_pattern }}
+      ref_filter: ${{ inputs.ref_filter }}
+      dry_run: ${{ inputs.dry_run }}

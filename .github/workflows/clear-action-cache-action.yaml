@@ -1,0 +1,62 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# =============================================================================
+# Thin cache-housekeeping caller
+# =============================================================================
+# This repository consumes its own reusable cache workflow, so the
+# workflow shipped to consumers is the one exercised here: a regression
+# in clear-action-cache.yaml breaks this repository's housekeeping
+# rather than surfacing first in a downstream project.
+#
+# A caller is required rather than optional. The reusable declares only
+# workflow_call, so it cannot be dispatched directly; this file is what
+# puts "Run workflow" back in the Actions tab.
+#
+# The reusable is referenced by LOCAL path, matching the convention
+# established in release-action.yaml: the branch's own copy runs, so a
+# run always validates the code on that branch, and no chicken-and-egg
+# self-pin is needed. Consumers instead pin a released SHA, as
+# examples/clear-action-cache/github.yaml shows.
+# =============================================================================
+name: 'Clear Action Cache 🧹'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_dispatch:
+    inputs:
+      key_pattern:
+        description: >-
+          Optional substring filter applied to cache keys. Leave
+          empty to remove every cache entry.
+        required: false
+        default: ''
+        type: string
+      ref_filter:
+        description: >-
+          Optional git ref to limit deletion to (e.g.
+          'refs/heads/main' or 'refs/pull/42/merge'). Leave empty
+          to ignore the ref attribute.
+        required: false
+        default: ''
+        type: string
+      dry_run:
+        description: >-
+          When true, list matching entries but do not delete them.
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+jobs:
+  clear-action-cache:
+    name: 'Clear Action Cache'
+    permissions:
+      actions: write  # list and delete repository Actions caches
+    uses: ./.github/workflows/clear-action-cache.yaml
+    with:
+      key_pattern: ${{ inputs.key_pattern }}
+      ref_filter: ${{ inputs.ref_filter }}
+      dry_run: ${{ inputs.dry_run }}

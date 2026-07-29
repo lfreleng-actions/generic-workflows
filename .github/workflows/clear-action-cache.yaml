@@ -1,12 +1,26 @@
 ---
-# SPDX-FileCopyrightText: 2025 The Linux Foundation
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
 
-name: 'Clear Action Cache 🧹'
+# Reusable Actions cache housekeeping.
+#
+# Lists the repository's Actions caches, deletes those matching the
+# supplied filters, and verifies afterwards that every entry it targeted
+# has gone. Deleting nothing is not an error: an empty filter set targets
+# every cache, and a filter matching nothing exits cleanly.
+#
+# Verification asserts that the specific IDs captured before deletion are
+# absent, rather than that no cache matches the filters. Other workflows
+# save caches while this one runs, so a match count of zero is not a
+# condition this job can honestly guarantee.
+#
+# Call this from a thin caller workflow; see
+# examples/clear-action-cache/ for a dispatchable caller.
+name: '[R] Clear Action Cache 🧹'
 
 # yamllint disable-line rule:truthy
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
       key_pattern:
         description: >-
@@ -24,15 +38,14 @@ on:
         default: ''
         type: string
       dry_run:
+        # workflow_call supports boolean, string and number only, so this
+        # is a boolean here; a caller exposing a dispatch menu can keep a
+        # choice input of its own and pass the value through.
         description: >-
-          When 'true', list matching entries but do not delete
-          them.
+          When true, list matching entries but do not delete them.
         required: false
-        default: 'false'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
+        default: false
+        type: boolean
 
 permissions: {}
 
@@ -305,6 +318,9 @@ jobs:
             echo "| Total entries | $after_count |"
             echo "| Remaining matches | $remaining_matches |"
             echo ""
+            echo "Remaining matches counts every entry matching the"
+            echo "filters, including any created after this run began."
+            echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
           if [ "$DRY_RUN" = "true" ]; then
@@ -312,9 +328,41 @@ jobs:
             exit 0
           fi
 
-          if [ "$remaining_matches" -ne 0 ]; then
-            echo "::error::Expected zero matching cache entries " \
-              "after deletion, found $remaining_matches"
+          # Deletion targets the entries matched in the snapshot taken
+          # before it ran. Other workflows can save caches while this one
+          # is working, and a new entry may match the same filters, so a
+          # remaining-match count of zero is not a safe success
+          # condition: it turns an unrelated concurrent cache into a
+          # spurious failure. Assert instead that each entry actually
+          # targeted has gone, which is the guarantee this job owes its
+          # caller. The count above stays in the summary as information.
+          surviving_ids=''
+          if [ -s matched_ids.txt ] && [ -n "$all_caches" ]; then
+            # A blank line becomes an empty grep pattern, which matches
+            # every remaining ID and would invent survivors, so drop
+            # them before using the file as a pattern list.
+            grep -v '^[[:space:]]*$' matched_ids.txt \
+              > targeted_ids.txt || true
+            if [ -s targeted_ids.txt ]; then
+              # Intersect in a single pass. Testing each targeted ID
+              # separately would re-scan the remaining list, and spawn a
+              # process, once per entry.
+              surviving_ids=$(
+                printf '%s\n' "$all_caches" | jq -r '.id' \
+                  | grep -Fxf targeted_ids.txt || true
+              )
+            fi
+          fi
+
+          if [ -n "$surviving_ids" ]; then
+            printf '%s\n' "$surviving_ids" | while IFS= read -r cache_id; do
+              echo "::error::Cache entry $cache_id still present"
+            done
+            survivors=$(
+              printf '%s\n' "$surviving_ids" | wc -l | tr -d '[:space:]'
+            )
+            echo "::error::$survivors targeted cache entr(y/ies) " \
+              "survived deletion"
             exit 1
           fi
 
