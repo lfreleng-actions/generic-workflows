@@ -92,7 +92,7 @@ tag pushed months ago, or a tag pointing at an outdated commit.
 
 Copy the appropriate example from `examples/release/` into your
 project's `.github/workflows/` directory as `release-action.yaml` and
-pin the `uses:` ref to a `gha-workflows` release SHA.
+pin the `uses:` ref to a `generic-workflows` release SHA.
 
 Minimal GitHub-native caller:
 
@@ -117,8 +117,8 @@ jobs:
     name: 'Release'
     permissions:
       contents: write
-    # Pin a real gha-workflows release SHA in place of <SHA>.
-    uses: lfreleng-actions/gha-workflows/.github/workflows/release.yaml@<SHA>
+    # Pin a real generic-workflows release SHA in place of <SHA>.
+    uses: lfreleng-actions/generic-workflows/.github/workflows/release.yaml@<SHA>
 ```
 
 - `examples/release/github.yaml` — GitHub-native projects.
