@@ -1,0 +1,53 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Linux Foundation
+
+# =============================================================================
+# Thin release caller (Model A, tag-driven)
+# =============================================================================
+# This repository consumes its own reusable release workflow. Every
+# release therefore exercises the workflow shipped to consumers: a
+# regression in release.yaml breaks this repository's own release
+# instead of surfacing first in a downstream project.
+#
+# This file replaces the former "fat" tag-push.yaml, which duplicated
+# the reusable's tag-validate and promote-release logic inline. That is
+# exactly the migration examples/release/github.yaml instructs
+# consumers to perform.
+#
+# The reusable is referenced by LOCAL path, matching the convention
+# established in testing.yaml: the tag's own copy of release.yaml runs,
+# so a release always validates the code being released, and no
+# chicken-and-egg self-pin is needed. Consumers instead pin a released
+# SHA, as examples/release/github.yaml shows.
+#
+# The reusable guards against tag-deletion events internally, so this
+# caller carries no `if:` condition.
+# =============================================================================
+name: 'Release on Tag Push 🚀'
+
+# yamllint disable-line rule:truthy
+on:
+  push:
+    tags:
+      - '**'
+
+permissions: {}
+
+# Serialise repeated runs for the same tag; never cancel an in-flight
+# release promotion. Distinct tags use distinct groups and proceed
+# independently.
+concurrency:
+  group: '${{ github.workflow }}-${{ github.ref }}'
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: 'Release'
+    permissions:
+      contents: write  # Draft, then publish, the GitHub release
+    uses: ./.github/workflows/release.yaml
+    # No `with:` block: this repository adopts the organisation's
+    # release-gating policy unmodified, which is what the reusable's
+    # defaults encode. Overriding here would mean shipping a policy we
+    # do not ourselves run.
