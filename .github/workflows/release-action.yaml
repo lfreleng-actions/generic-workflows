@@ -15,11 +15,10 @@
 # exactly the migration examples/release/github.yaml instructs
 # consumers to perform.
 #
-# The reusable is referenced by LOCAL path, matching the convention
-# established in testing.yaml: the tag's own copy of release.yaml runs,
-# so a release always validates the code being released, and no
-# chicken-and-egg self-pin is needed. Consumers instead pin a released
-# SHA, as examples/release/github.yaml shows.
+# The reusable is referenced by LOCAL path, so the tag's own copy of
+# release.yaml runs. A release therefore always validates the code
+# being released, and no chicken-and-egg self-pin is needed. Consumers
+# instead pin a released SHA, as examples/release/github.yaml shows.
 #
 # The reusable guards against tag-deletion events internally, so this
 # caller carries no `if:` condition.
