@@ -346,17 +346,36 @@ jobs:
           if [ -s matched_ids.txt ] && [ -n "$all_caches" ]; then
             # A blank line becomes an empty grep pattern, which matches
             # every remaining ID and would invent survivors, so drop
-            # them before using the file as a pattern list.
+            # them before using the file as a pattern list. grep exits 1
+            # if that leaves nothing, which is fine, but a higher status
+            # is a genuine failure (unreadable file, bad usage). A
+            # blanket `|| true` would swallow those and let this step
+            # report success without having verified anything.
+            status=0
             grep -v '^[[:space:]]*$' matched_ids.txt \
-              > targeted_ids.txt || true
+              > targeted_ids.txt || status=$?
+            if [ "$status" -gt 1 ]; then
+              echo "::error::Could not read matched cache IDs" \
+                "(grep exit $status)"
+              exit 1
+            fi
             if [ -s targeted_ids.txt ]; then
               # Intersect in a single pass. Testing each targeted ID
               # separately would re-scan the remaining list, and spawn a
-              # process, once per entry.
+              # process, once per entry. jq runs on its own so `set -e`
+              # catches its failures: piped straight into grep, a jq
+              # error would hide behind grep's rightmost exit 1.
+              remaining_ids=$(printf '%s\n' "$all_caches" | jq -r '.id')
+              status=0
               surviving_ids=$(
-                printf '%s\n' "$all_caches" | jq -r '.id' \
-                  | grep -Fxf targeted_ids.txt || true
-              )
+                printf '%s\n' "$remaining_ids" \
+                  | grep -Fxf targeted_ids.txt
+              ) || status=$?
+              if [ "$status" -gt 1 ]; then
+                echo "::error::Could not compare remaining cache IDs" \
+                  "(grep exit $status)"
+                exit 1
+              fi
             fi
           fi
 
@@ -367,7 +386,7 @@ jobs:
             survivors=$(
               printf '%s\n' "$surviving_ids" | wc -l | tr -d '[:space:]'
             )
-            echo "::error::$survivors targeted cache entr(y/ies) " \
+            echo "::error::$survivors targeted cache entr(y/ies)" \
               "survived deletion"
             exit 1
           fi
