@@ -6,7 +6,7 @@
 # EXAMPLE: caller for the reusable clear-action-cache workflow
 # =============================================================================
 # Copy this file into your project's .github/workflows/ directory as
-# clear-action-cache-action.yaml and pin the `uses:` ref to a
+# clear-action-cache.yaml and pin the `uses:` ref to a
 # generic-workflows release SHA.
 #
 # Cache housekeeping is a deliberate, occasional act, so this caller is

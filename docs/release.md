@@ -14,7 +14,9 @@ against the organisation's release-gating policy and then promotes the
 matching draft GitHub release.
 
 This replaces the per-repository "fat" `tag-push.yaml` with a single,
-centrally-maintained reusable and a small `release-action.yaml` caller.
+centrally-maintained reusable and a small `release.yaml` caller. The
+filename names the outcome rather than the trigger, and sits beside the
+`release-drafter.yaml` that creates the draft this workflow publishes.
 
 ## What it does
 
@@ -91,8 +93,14 @@ tag pushed months ago, or a tag pointing at an outdated commit.
 ## Thin caller usage
 
 Copy the appropriate example from `examples/release/` into your
-project's `.github/workflows/` directory as `release-action.yaml` and
-pin the `uses:` ref to a `generic-workflows` release SHA.
+project's `.github/workflows/` directory as `release.yaml` and pin the
+`uses:` ref to a `generic-workflows` release SHA. Delete the
+`tag-push.yaml` it replaces in the same change.
+
+Inside this repository the caller is `release-action.yaml`, because a
+caller here cannot share a filename with the reusable it calls. That
+suffix is a local disambiguator, not the convention for consuming
+repositories.
 
 Minimal GitHub-native caller:
 
