@@ -19,12 +19,11 @@ projects.
 ## Release reusable workflow
 
 [`.github/workflows/release.yaml`](.github/workflows/release.yaml) is a
-tag-driven (Model A) release workflow. A thin
-`release-action.yaml` caller in each repository runs on tag pushes and
-delegates to it; the reusable checks the pushed tag against a
-configurable release-gating policy and then promotes the matching draft
-GitHub release. A caller replaces a per-repository release workflow with
-a single delegating job.
+tag-driven (Model A) release workflow. A thin `release.yaml` caller in
+each repository runs on tag pushes and delegates to it; the reusable
+checks the pushed tag against a configurable release-gating policy and
+then promotes the matching draft GitHub release. A caller replaces a
+per-repository release workflow with a single delegating job.
 
 The gates default to a policy that prevents faulty, immutable
 releases — for example a stale tag created long ago, or a tag pointing
@@ -49,8 +48,9 @@ at an outdated commit:
 
 Copy the appropriate caller from
 [`examples/release/`](examples/release/) into your project's
-`.github/workflows/` directory as `release-action.yaml` and pin the
-`uses:` ref to a `generic-workflows` release SHA:
+`.github/workflows/` directory as `release.yaml`, delete the
+`tag-push.yaml` it replaces, and pin the `uses:` ref to a
+`generic-workflows` release SHA:
 
 ```yaml
 ---
@@ -91,7 +91,7 @@ and the job graph.
 [`.github/workflows/clear-action-cache.yaml`](.github/workflows/clear-action-cache.yaml)
 lists a repository's Actions caches, deletes the entries matching the
 supplied filters, and then confirms the deletion. A thin
-`clear-action-cache-action.yaml` caller in each repository surfaces the
+`clear-action-cache.yaml` caller in each repository surfaces the
 filters as a `workflow_dispatch` form and delegates to it.
 
 <!-- markdownlint-disable MD013 -->
@@ -117,7 +117,7 @@ asked for.
 Copy the caller from
 [`examples/clear-action-cache/`](examples/clear-action-cache/) into your
 project's `.github/workflows/` directory as
-`clear-action-cache-action.yaml` and pin the `uses:` ref to a
+`clear-action-cache.yaml` and pin the `uses:` ref to a
 `generic-workflows` release SHA:
 
 ```yaml
@@ -141,6 +141,15 @@ declares the grant.
 `workflow_call` accepts `boolean`, `string` and `number` inputs but not
 `choice`, so `dry_run` takes a boolean. A caller wanting a dispatch menu
 keeps a `choice` input of its own and passes the value through.
+
+## Caller filenames
+
+A consuming repository names its callers after the reusable it calls:
+`release.yaml` and `clear-action-cache.yaml`. The callers in this
+repository carry an `-action` suffix (`release-action.yaml`,
+`clear-action-cache-action.yaml`) because a caller here cannot share a
+filename with the reusable it calls. Do not copy that suffix into a
+consuming repository.
 
 ## Gerrit support
 

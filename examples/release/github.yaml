@@ -6,7 +6,7 @@
 # EXAMPLE: GitHub-native release caller (thin caller)
 # =============================================================================
 # Copy this file into your project's .github/workflows/ directory as
-# release-action.yaml, replacing the existing "fat" tag-push.yaml. Adjust
+# release.yaml, replacing the existing "fat" tag-push.yaml. Adjust
 # the `uses:` ref (pin a generic-workflows release SHA) and the optional
 # `with:` overrides to suit your project.
 #
