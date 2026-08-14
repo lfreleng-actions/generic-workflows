@@ -221,26 +221,24 @@ jobs:
     outputs:
       tag: ${{ steps.tag-validate.outputs.tag_name }}
     steps:
-      - name: 'Load egress allow-list (block mode)'
-        if: inputs.harden_runner_egress != 'audit'
+      # One harden-runner step with the policy computed, rather than
+      # two selected by condition: harden-runner declares a 'pre'
+      # entry point and no 'pre-if', so its pre-phase ignores any
+      # step-level 'if:' and always runs. Both would engage the agent,
+      # the first would win, and audit mode would be unreachable.
+      - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
-      - name: 'Harden runner (block)'
-        if: inputs.harden_runner_egress != 'audit'
+      - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920  # v2.20.0
+        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40  # v2.20.1
         with:
-          egress-policy: 'block'
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
-      - name: 'Harden runner (audit)'
-        if: inputs.harden_runner_egress == 'audit'
-        # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920  # v2.20.0
-        with:
-          egress-policy: 'audit'
 
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
@@ -323,26 +321,19 @@ jobs:
       # yamllint disable-line rule:line-length
       release_url: ${{ steps.promote-release.outputs.release_url || steps.set-promoted-url.outputs.release_url }}
     steps:
-      - name: 'Load egress allow-list (block mode)'
-        if: inputs.harden_runner_egress != 'audit'
+      - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
-      - name: 'Harden runner (block)'
-        if: inputs.harden_runner_egress != 'audit'
+      - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920  # v2.20.0
+        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40  # v2.20.1
         with:
-          egress-policy: 'block'
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
-      - name: 'Harden runner (audit)'
-        if: inputs.harden_runner_egress == 'audit'
-        # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920  # v2.20.0
-        with:
-          egress-policy: 'audit'
 
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
