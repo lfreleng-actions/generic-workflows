@@ -39,12 +39,12 @@ gerrit-validate -> tag-validate -> promote-release
    already-published release as success.
 
 The two jobs that check out the repository (`tag-validate` and
-`promote-release`) run the harden-runner triple (block-mode allow-list
-load + harden-runner block, or harden-runner audit when
-`harden_runner_egress: 'audit'`), pin every `uses:` to a full commit
-SHA, and never interpolate `${{ }}` into `run:` blocks. The
-`gerrit-validate` job performs input checks and makes no network calls,
-and needs no egress hardening.
+`promote-release`) load the central allow-list and then run a single
+harden-runner step that derives its egress policy from
+`harden_runner_egress`, pin every `uses:` to a full commit SHA, and
+never interpolate `${{ }}` into `run:` blocks. The `gerrit-validate`
+job performs input checks and makes no network calls, and needs no
+egress hardening.
 
 ## Release gates
 
