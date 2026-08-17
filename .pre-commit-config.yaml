@@ -126,3 +126,16 @@ repos:
         types:
           - yaml
       - id: check-readthedocs
+
+  # Fixtures for the Dependabot single-commit title exception. The test
+  # extracts the rule from the workflow, so it runs whenever either the
+  # workflow or the fixtures change.
+  - repo: local
+    hooks:
+      - id: relax-matches-fixtures
+        name: Semantic PR title exception fixtures
+        entry: tests/test-relax-matches.sh
+        language: script
+        pass_filenames: false
+        # yamllint disable-line rule:line-length
+        files: '^(\.github/workflows/semantic-pull-request\.yaml|tests/test-relax-matches\.sh)$'

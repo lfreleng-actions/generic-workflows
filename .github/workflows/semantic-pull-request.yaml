@@ -1,0 +1,493 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Reusable Conventional Commits pull request title check.
+#
+#   semantic-pull-request  (single job: gate -> validate)
+#
+# Wraps amannn/action-semantic-pull-request and adds one thing the
+# action cannot express: a narrowly-scoped exception for Dependabot's
+# truncated single-commit subjects.
+#
+# Dependabot shortens a commit subject that would otherwise be too long
+# by deleting the ' from <old> to <new>' version fragment, while the
+# pull request title keeps it. The subject and title then differ and
+# validateSingleCommitMatchesPrTitle fails, blocking a bump nobody can
+# fix without rewriting Dependabot's commit. The gate step below
+# detects exactly that transformation and relaxes the match for it;
+# every other pull request keeps the strict exact-match check.
+#
+# Caller requirements:
+#   * Trigger on 'pull_request' or 'pull_request_target'. The action
+#     infers the pull request from the event payload and fails on any
+#     other event.
+#   * Grant the calling job BOTH 'contents: read' and
+#     'pull-requests: read'. A called workflow's token permissions are
+#     capped by its caller, so omitting the latter makes the PR API
+#     calls 403 on repositories that default to a minimal token.
+#
+# Call this from a thin caller workflow; see
+# examples/semantic-pull-request/ and docs/semantic-pull-request.md.
+name: '[R] Semantic Pull Request 🛠️'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_call:
+    inputs:
+      # --- Conventional Commits vocabulary ---
+      types:
+        # yamllint disable-line rule:line-length
+        description: 'Newline-separated list of allowed Conventional Commit types'
+        required: false
+        type: string
+        default: |
+          Fix
+          Feat
+          Chore
+          Docs
+          Style
+          Refactor
+          Perf
+          Test
+          Revert
+          CI
+          Build
+      scopes:
+        description: >-
+          Newline-separated list of allowed scopes, as regex patterns
+          auto-wrapped in '^ $'. Empty permits any scope.
+        required: false
+        type: string
+        default: ''
+      disallow_scopes:
+        description: >-
+          Newline-separated list of rejected scopes, as regex patterns.
+          Empty rejects none.
+        required: false
+        type: string
+        default: ''
+      require_scope:
+        description: 'Require every title to carry a scope'
+        required: false
+        type: boolean
+        default: false
+      subject_pattern:
+        description: >-
+          Regex the subject (the text after 'type(scope): ') must
+          match. Empty applies no additional subject rule.
+        required: false
+        type: string
+        default: ''
+      subject_pattern_error:
+        description: >-
+          Error message shown when subject_pattern does not match. The
+          placeholders 'subject' and 'title' expand in the message.
+          Ignored unless subject_pattern is set.
+        required: false
+        type: string
+        default: ''
+      ignore_labels:
+        description: >-
+          Newline-separated labels that skip validation entirely. A
+          caller using this should add 'labeled' and 'unlabeled' to its
+          pull_request trigger so the check re-runs when labels change.
+        required: false
+        type: string
+        default: ''
+
+      # --- Single-commit checks ---
+      validate_single_commit:
+        # yamllint disable-line rule:line-length
+        description: 'Validate the single-commit message when a PR has one commit'
+        required: false
+        type: boolean
+        default: true
+      validate_single_commit_matches_pr_title:
+        # yamllint disable-line rule:line-length
+        description: 'Require the single commit subject to match the PR title'
+        required: false
+        type: boolean
+        default: true
+      dependabot_relax:
+        description: >-
+          Allow the Dependabot version-fragment exception described at
+          the top of this file. Disable to hold every author, bots
+          included, to an exact single-commit/title match.
+        required: false
+        type: boolean
+        default: true
+
+      # --- Runner selection and timeout ---
+      runs_on:
+        description: >-
+          Runner label for the job. Must be a LINUX runner:
+          harden-runner enforces an egress policy on Linux only, and
+          the job fails early on anything else rather than running
+          unhardened.
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+      timeout_minutes:
+        description: 'Timeout (minutes) for the job'
+        required: false
+        type: number
+        default: 5
+
+      # --- Runner hardening ---
+      harden_runner_egress:
+        description: "Harden-runner egress policy: 'block' or 'audit'"
+        required: false
+        type: string
+        default: 'block'
+      harden_runner_allowlist:
+        description: 'Out-of-band harden-runner allow-list configuration'
+        required: false
+        type: string
+        # yamllint disable-line rule:line-length
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@4e6952177b00e11f15cdc7098fd68e38881c9c39'  # v0.14.0
+
+    outputs:
+      # Both values are drawn from a fixed vocabulary computed by the
+      # gate step; neither carries pull request title or commit text, so
+      # a caller may use them in a run: block without laundering them.
+      relaxed:
+        description: >-
+          'true' when the Dependabot exception applied to this run.
+        value: ${{ jobs.semantic-pull-request.outputs.relaxed }}
+      reason:
+        description: 'Fixed-vocabulary explanation of the gate decision'
+        value: ${{ jobs.semantic-pull-request.outputs.reason }}
+
+permissions: {}
+
+# No concurrency block, deliberately.
+#
+# A literal group would serialise the check across every open pull
+# request, and a per-pull-request group buys nothing a caller cannot
+# express. Concurrency belongs to the caller, which should name its
+# group after the check (not '${{ github.workflow }}', which resolves
+# to the workflow NAME and so collides with any workflow sharing it),
+# set 'cancel-in-progress: false', and set 'queue: max' so a burst of
+# events queues instead of replacing the pending run. Any of the three
+# left wrong leaves a cancelled check run beside a successful one for
+# the same head SHA. See examples/semantic-pull-request/github.yaml.
+
+jobs:
+  semantic-pull-request:
+    name: 'Semantic Pull Request'
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    permissions:
+      contents: read
+      # The gate step reads the pull request and its commits, and the
+      # action re-reads both. Repositories that default the token to
+      # minimal permissions 403 without this, and the CALLING job must
+      # grant it too (see the caller requirements at the top).
+      pull-requests: read  # Read PR title and commits (avoids 403)
+    outputs:
+      relaxed: ${{ steps.gate.outputs.relaxed }}
+      reason: ${{ steps.gate.outputs.reason }}
+    steps:
+      # Load the egress allow-list out-of-band and publish it as
+      # $CONNECTION_ALLOW_LIST for the harden-runner step below.
+      # Loading it here rather than reading an organisation variable
+      # keeps the workflow usable from pull requests raised on forks,
+      # where organisation variables are unreachable and previously
+      # forced a fallback to audit mode.
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+
+      # One harden-runner step with the policy computed, rather than
+      # two selected by condition: harden-runner declares a 'pre' entry
+      # point and no 'pre-if', so its pre-phase runs whatever a
+      # step-level 'if:' says. With both engaged the first wins, and
+      # audit mode becomes unreachable however the caller asks for it.
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920  # v2.20.0
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ (inputs.harden_runner_egress == 'audit') && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Evaluate Dependabot single-commit title exception'
+        id: gate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          REPO: ${{ github.repository }}
+          RELAX_ENABLED: ${{ inputs.dependabot_relax }}
+          VALIDATE_SINGLE: ${{ inputs.validate_single_commit }}
+          VALIDATE_MATCH: ${{ inputs.validate_single_commit_matches_pr_title }}
+        run: |
+          # Decide whether the Dependabot exception applies to this PR
+          set -euo pipefail
+
+          # harden-runner enforces an egress policy on Linux only. On
+          # any other runner it degrades to a warning and the job would
+          # run unhardened while still reporting success, so stop here
+          # instead. RUNNER_OS is exact where a label match would guess.
+          if [ "${RUNNER_OS}" != 'Linux' ]; then
+            echo "::error::runs_on must name a Linux runner:" \
+              "harden-runner enforces an egress policy on Linux only" \
+              "(RUNNER_OS=${RUNNER_OS})"
+            exit 1
+          fi
+
+          # The action infers the pull request from the event payload
+          # and throws on anything else. Say so against the caller's
+          # trigger rather than letting it surface from inside the
+          # action two steps later.
+          if [ -z "${PR_NUMBER}" ]; then
+            echo "::error::No pull request in the event payload:" \
+              "call this workflow from a 'pull_request' or" \
+              "'pull_request_target' trigger" \
+              "(event: ${GITHUB_EVENT_NAME})"
+            exit 1
+          fi
+
+          # BEGIN relax_matches (extracted by tests/test-relax-matches.sh)
+          # True when SUBJECT is TITLE with exactly one contiguous span
+          # removed, that span sitting on whitespace boundaries and
+          # reading 'from <old> to <new>'.
+          #
+          # Taking the longest common prefix and the longest common
+          # suffix and requiring them to account for the whole subject
+          # is what establishes "exactly one span was deleted". An
+          # earlier revision tested only whether the subject was a
+          # leading substring of the title, which caught the fragment
+          # when it sat at the end but not when trailing context
+          # (' in /path', ' in the <name> group across N directories')
+          # left it mid-string.
+          relax_matches() {
+            local title="$1" subject="$2"
+            local tlen=${#title} slen=${#subject}
+            local p=0 q=0 span trimmed re start end lead
+
+            # Something must have been removed, from something.
+            [ -n "${subject}" ] || return 1
+            [ "${tlen}" -gt "${slen}" ] || return 1
+
+            # Longest common prefix, bounded by the subject.
+            while [ "${p}" -lt "${slen}" ] \
+              && [ "${title:p:1}" = "${subject:p:1}" ]; do
+              p=$((p + 1))
+            done
+
+            # Longest common suffix that does not overlap the prefix.
+            while [ "${q}" -lt $((slen - p)) ] \
+              && [ "${title:tlen-1-q:1}" = "${subject:slen-1-q:1}" ]; do
+              q=$((q + 1))
+            done
+
+            # Both runs together must cover the whole subject. Where
+            # they do not, more than one span differs: that is title
+            # drift, which this check exists to catch.
+            [ $((p + q)) -eq "${slen}" ] || return 1
+
+            # Absolute bounds of the removed span within the title.
+            start=$p
+            end=$((tlen - q))
+            span="${title:start:end-start}"
+
+            # Trim the span, tracking how far the leading trim moved,
+            # so the boundary test below reads the title either side
+            # of the FRAGMENT rather than either side of whitespace
+            # that happened to travel with it. Which edge carries that
+            # whitespace depends on where the deletion sat: a trailing
+            # fragment leaves it on the left, a mid-string one on the
+            # right, because the common-prefix scan claims the shared
+            # space before the suffix scan can reach it.
+            trimmed="${span#"${span%%[![:space:]]*}"}"
+            lead=$((${#span} - ${#trimmed}))
+            trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+            start=$((start + lead))
+            end=$((start + ${#trimmed}))
+
+            # The fragment must be delimited by whitespace, or by the
+            # ends of the title, on BOTH sides. Testing one side only
+            # would accept a fragment fused to neighbouring text on
+            # the other, letting a mangled package name pose as a
+            # truncation.
+            [ "${start}" -eq 0 ] \
+              || [ "${title:start-1:1}" = ' ' ] || return 1
+            [ "${end}" -eq "${tlen}" ] \
+              || [ "${title:end:1}" = ' ' ] || return 1
+
+            # Require the classic Dependabot version fragment, and
+            # nothing else.
+            re='^from[[:space:]][^[:space:]]+'
+            re="${re}[[:space:]]to[[:space:]][^[:space:]]+\$"
+            [[ "${trimmed}" =~ ${re} ]]
+          }
+          # END relax_matches
+
+          # Defaults assume strict exact-match validation.
+          relaxed=false
+          subject=''
+          commit_count='n/a'
+          reason=''
+
+          # The payload title is good enough to print, and every branch
+          # that compares it against a commit subject refreshes it from
+          # the API first (see below).
+          title="${PR_TITLE}"
+
+          if [ "${RELAX_ENABLED}" != 'true' ]; then
+            reason='Dependabot exception disabled by the caller'
+          elif [ "${VALIDATE_SINGLE}" != 'true' ]; then
+            # The action nests the title match inside its
+            # validateSingleCommit branch, so with that off the match
+            # never runs and there is nothing to relax. Stop before
+            # spending API calls on a decision that cannot apply, and
+            # before publishing a relaxed=true a caller would misread.
+            reason='Caller disabled single-commit validation'
+          elif [ "${VALIDATE_MATCH}" != 'true' ]; then
+            reason='Caller disabled single-commit/PR-title matching'
+          elif [ "${PR_AUTHOR}" != 'dependabot[bot]' ]; then
+            # Short-circuit before any API call. Most pull requests land
+            # here, the exception cannot apply to them, and a repository
+            # whose caller forgot 'pull-requests: read' therefore only
+            # sees the problem on a Dependabot pull request.
+            echo '⏩ Author is not dependabot[bot]'
+            reason='PR author is not dependabot[bot]'
+          else
+            echo '✅ Dependabot is the PR author'
+
+            # Re-read the title through the API rather than trusting the
+            # payload: a re-run after a title edit carries a stale one,
+            # and the action re-reads it for the same reason. Deciding
+            # on a different title than the action validates would be
+            # worse than not deciding at all.
+            #
+            # A failure here is not fatal. Losing the exception leaves
+            # the strict check in place, which is the safe direction, so
+            # warn and carry on rather than failing a required check on
+            # a transient API error or a missing permission.
+            api_status=0
+            pr_json="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}")" \
+              || api_status=$?
+
+            if [ "${api_status}" -ne 0 ]; then
+              echo "::warning::Could not read pull request metadata" \
+                "(gh exit ${api_status}); keeping strict validation"
+              reason='Pull request metadata unavailable'
+            else
+              title="$(printf '%s' "${pr_json}" | jq -r '.title')"
+            fi
+          fi
+
+          if [ -z "${reason}" ]; then
+            # Collect non-merge commit subjects (fewer than two
+            # parents), mirroring how GitHub picks a squash subject.
+            # Process substitution hides a failing gh from 'set -e', so
+            # capture the status explicitly.
+            api_status=0
+            commits="$(
+              gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/commits" \
+                --jq '.[] | select((.parents | length) < 2)
+                  | .commit.message | split("\n")[0]'
+            )" || api_status=$?
+
+            if [ "${api_status}" -ne 0 ]; then
+              echo "::warning::Could not list pull request commits" \
+                "(gh exit ${api_status}); keeping strict validation"
+              reason='Pull request commits unavailable'
+            else
+              mapfile -t subjects <<< "${commits}"
+              # A single empty line is an empty result, not one commit.
+              if [ "${#subjects[@]}" -eq 1 ] && [ -z "${subjects[0]}" ]; then
+                subjects=()
+              fi
+              commit_count="${#subjects[@]}"
+              echo "Non-merge commits: ${commit_count}"
+
+              if [ "${commit_count}" -ne 1 ]; then
+                reason='PR does not have exactly one non-merge commit'
+              else
+                subject="${subjects[0]}"
+                if [ "${title}" = "${subject}" ]; then
+                  reason='Commit subject already matches the PR title'
+                elif relax_matches "${title}" "${subject}"; then
+                  relaxed=true
+                  reason='Version fragment removed from the PR title'
+                else
+                  reason='Commit subject does not match the PR title'
+                fi
+              fi
+            fi
+          fi
+
+          if [ "${VALIDATE_SINGLE}" != 'true' ]; then
+            match_setting='n/a'
+            echo 'ℹ️ Caller disabled single-commit validation'
+          elif [ "${VALIDATE_MATCH}" != 'true' ]; then
+            match_setting=false
+            echo 'ℹ️ Caller disabled single-commit/PR-title matching'
+          elif [ "${relaxed}" = 'true' ]; then
+            match_setting=false
+            echo '⏩ Relaxing single-commit/PR-title matching'
+          else
+            match_setting=true
+            echo '✅ Strict exact title match retained'
+          fi
+
+          {
+            echo "relaxed=${relaxed}"
+            echo "reason=${reason}"
+          } >> "${GITHUB_OUTPUT}"
+
+          # Human-readable summary on the run page. Controlled fields
+          # go in a table; the untrusted title and subject render in an
+          # indented code block so any embedded Markdown or HTML shows
+          # literally and cannot spoof the summary or trigger a fetch.
+          {
+            echo '### Semantic Pull Request gate'
+            echo ''
+            echo '| Field | Value |'
+            echo '| ----- | ----- |'
+            echo "| PR author | ${PR_AUTHOR} |"
+            echo "| Non-merge commits | ${commit_count} |"
+            echo "| Decision | ${reason} |"
+            echo "| Exception applied | ${relaxed} |"
+            echo "| validateSingleCommitMatchesPrTitle | ${match_setting} |"
+            if [ -n "${title}" ]; then
+              echo ''
+              echo 'PR title:'
+              echo ''
+              printf '    %s\n' "${title}"
+            fi
+            if [ -n "${subject}" ]; then
+              echo ''
+              echo 'Single commit subject:'
+              echo ''
+              printf '    %s\n' "${subject}"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: 'Validate pull request title'
+        # yamllint disable-line rule:line-length
+        uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50  # v6.1.1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          types: ${{ inputs.types }}
+          scopes: ${{ inputs.scopes }}
+          disallowScopes: ${{ inputs.disallow_scopes }}
+          requireScope: ${{ inputs.require_scope }}
+          subjectPattern: ${{ inputs.subject_pattern }}
+          subjectPatternError: ${{ inputs.subject_pattern_error }}
+          ignoreLabels: ${{ inputs.ignore_labels }}
+          validateSingleCommit: ${{ inputs.validate_single_commit }}
+          # Honour the caller's setting, relaxed only for the Dependabot
+          # truncation the gate step above identified.
+          # yamllint disable-line rule:line-length
+          validateSingleCommitMatchesPrTitle: ${{ inputs.validate_single_commit_matches_pr_title && steps.gate.outputs.relaxed != 'true' }}
