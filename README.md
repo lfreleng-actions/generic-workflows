@@ -153,15 +153,27 @@ consuming repository.
 
 ## Gerrit support
 
-The release reusable is Gerrit-aware: when a caller sets the
-`gerrit_refspec` input it checks out the change with
-`checkout-gerrit-change-action` instead of `actions/checkout`. A release
-is tag-driven, so no Gerrit change context exists on the tag and the
-workflow casts no votes or comments — the Gerrit and GitHub-native
-release callers stay near-identical.
+Gerrit-mirrored projects use these workflows unchanged. Neither reusable
+here takes Gerrit *checkout* inputs, and neither performs a dual
+checkout. The release reusable keeps `require_gerrit`, which verifies a
+tag's signing key against a Gerrit account and has nothing to do with
+checkout.
 
-Cache housekeeping carries no Gerrit inputs: it acts on the GitHub
-mirror's Actions caches, which have no counterpart in Gerrit.
+That deviates from the sibling reusables in `python-workflows`,
+`node-workflows` and the rest, which run per patchset. Those accept a
+Gerrit refspec and pick between checking out the change and checking out
+the branch. A tag push carries no change, so that second path could
+never execute here. Carrying the `gerrit_*` inputs would advertise a
+capability the workflow does not have, and leave a dead branch to
+maintain.
+
+The release tag replicates from Gerrit to the GitHub mirror and the push
+triggers the caller, so what differs for a Gerrit project is where
+signing keys get verified: see `examples/release/gerrit.yaml`, which
+sets `require_gerrit: 'true'` and `require_github: 'false'`.
+
+Cache housekeeping acts on the GitHub mirror's Actions caches, which
+have no counterpart in Gerrit.
 
 ## Design
 

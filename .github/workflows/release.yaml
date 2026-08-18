@@ -11,8 +11,16 @@
 #
 # There is no Gerrit change context on a tag, so this workflow casts no
 # votes/comments: the Gerrit and GitHub-native callers are near
-# identical. The Gerrit inputs exist for the shared dual-checkout
-# convention and are empty for a normal tag push.
+# identical.
+#
+# It also carries no gerrit_* inputs and no dual checkout, which is a
+# deliberate deviation from the sibling reusables. Those run per
+# patchset, where a Gerrit refspec exists and the checkout must choose
+# between the change and the branch. A tag push carries no change, so
+# that second path could never execute here. Gerrit-mirrored projects
+# still use this workflow unchanged; see examples/release/gerrit.yaml,
+# which differs from the GitHub-native example only in where it
+# verifies signing keys.
 name: '[R] Release on Tag Push 🚀'
 
 # yamllint disable-line rule:truthy
@@ -118,30 +126,6 @@ on:
         # yamllint disable-line rule:line-length
         default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@bf6642f68d58c1b81bbe993e676d6cc339ac3654'  # v0.12.2
 
-      # --- Gerrit-aware checkout (empty unless dispatched via Gerrit) ---
-      gerrit_refspec:
-        description: 'Gerrit refspec of the change under test'
-        required: false
-        type: string
-        default: ''
-      gerrit_project:
-        description: 'Gerrit project name'
-        required: false
-        type: string
-        default: ''
-      gerrit_branch:
-        description: 'Gerrit target branch'
-        required: false
-        type: string
-        default: ''
-      gerrit_url:
-        description: >-
-          Gerrit server URL. Empty falls back to the GERRIT_URL
-          repository variable at runtime.
-        required: false
-        type: string
-        default: ''
-
     outputs:
       tag:
         description: 'Validated release tag/version string'
@@ -171,47 +155,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  gerrit-validate:
-    name: 'Validate Gerrit Inputs'
-    # Skip tag deletion events (matches tag-validate); on a normal push
-    # this runs and its dependents proceed. Only the inner step is
-    # further gated on gerrit_refspec.
-    if: ${{ !github.event.deleted }}
-    runs-on: 'ubuntu-latest'
-    permissions: {}
-    timeout-minutes: 2
-    steps:
-      - name: 'Require Gerrit project, branch and URL'
-        if: inputs.gerrit_refspec != ''
-        shell: bash
-        env:
-          GERRIT_PROJECT: ${{ inputs.gerrit_project }}
-          GERRIT_BRANCH: ${{ inputs.gerrit_branch }}
-          # yamllint disable-line rule:line-length
-          GERRIT_URL: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
-        run: |
-          # gerrit_refspec is set, so the Gerrit checkout path runs and
-          # also requires gerrit_project, gerrit_branch and a resolvable
-          # Gerrit URL (the gerrit_url input or the GERRIT_URL variable).
-          missing=''
-          if [ -z "${GERRIT_PROJECT}" ]; then
-            missing="${missing} gerrit_project"
-          fi
-          if [ -z "${GERRIT_BRANCH}" ]; then
-            missing="${missing} gerrit_branch"
-          fi
-          if [ -z "${GERRIT_URL}" ]; then
-            missing="${missing} gerrit_url/GERRIT_URL"
-          fi
-          if [ -n "${missing}" ]; then
-            echo "::error::gerrit_refspec is set but missing:${missing}"
-            exit 1
-          fi
-          echo "Gerrit inputs validated ✅"
-
   tag-validate:
     name: 'Validate Tag'
-    needs: gerrit-validate
     # Skip tag deletion events.
     if: ${{ !github.event.deleted }}
     runs-on: 'ubuntu-latest'
@@ -240,19 +185,9 @@ jobs:
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
 
-      - name: 'Checkout Gerrit change'
-        if: inputs.gerrit_refspec != ''
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@f87b90a3370e62dad310797fedc7fd3700c75832  # v1.0.2
-        with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
-          gerrit-project: ${{ inputs.gerrit_project }}
-          # yamllint disable-line rule:line-length
-          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
-          delay: '0s'
-          ref: refs/heads/${{ inputs.gerrit_branch }}
+      # One checkout, not two: a tag push carries no Gerrit change
+      # context, so there is no second path to select between.
       - name: 'Checkout repository'
-        if: inputs.gerrit_refspec == ''
         # yamllint disable-line rule:line-length
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -335,19 +270,8 @@ jobs:
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
 
-      - name: 'Checkout Gerrit change'
-        if: inputs.gerrit_refspec != ''
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@f87b90a3370e62dad310797fedc7fd3700c75832  # v1.0.2
-        with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
-          gerrit-project: ${{ inputs.gerrit_project }}
-          # yamllint disable-line rule:line-length
-          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
-          delay: '0s'
-          ref: refs/heads/${{ inputs.gerrit_branch }}
+      # One checkout, not two: see the note in tag-validate above.
       - name: 'Checkout repository'
-        if: inputs.gerrit_refspec == ''
         # yamllint disable-line rule:line-length
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
