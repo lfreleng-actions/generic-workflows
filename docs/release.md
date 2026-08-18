@@ -21,30 +21,45 @@ filename names the outcome rather than the trigger, and sits beside the
 ## What it does
 
 ```text
-gerrit-validate -> tag-validate -> promote-release
+tag-validate -> promote-release
 ```
 
-1. `gerrit-validate` — checks the Gerrit input contract. This job
-   always runs; a conditional step handles the check, so `needs:`
-   chains never get skip-propagated. A normal tag push (no Gerrit
-   inputs) makes this job a no-op.
-2. `tag-validate` — checks out the repository with full history and
+1. `tag-validate` — checks out the repository with full history and
    tags, then runs
    [`tag-validate-action`](https://github.com/lfreleng-actions/tag-validate-action)
    against every configured gate. On success it ensures a draft release
    exists (creating one if necessary), so promotion can proceed.
-3. `promote-release` — publishes the draft release via
+2. `promote-release` — publishes the draft release via
    [`draft-release-promote-action`](https://github.com/lfreleng-actions/draft-release-promote-action).
    Idempotent: a re-run after a successful promotion treats the
    already-published release as success.
 
-The two jobs that check out the repository (`tag-validate` and
-`promote-release`) load the central allow-list and then run a single
-harden-runner step that derives its egress policy from
+Both jobs check out the repository, load the central allow-list and then
+run a single harden-runner step that derives its egress policy from
 `harden_runner_egress`, pin every `uses:` to a full commit SHA, and
-never interpolate `${{ }}` into `run:` blocks. The `gerrit-validate`
-job performs input checks and makes no network calls, and needs no
-egress hardening.
+never interpolate `${{ }}` into `run:` blocks.
+
+## No Gerrit checkout inputs
+
+The sibling reusables in `python-workflows`, `node-workflows` and the
+rest run per patchset. They accept a Gerrit refspec and pick between
+checking out the change and checking out the branch.
+
+This workflow runs on a tag push, which carries no Gerrit change
+context, so that second path could never execute. It takes no
+`gerrit_*` inputs and performs one checkout rather than two. Carrying
+them would advertise a capability the workflow does not have, and leave
+a dead branch for a future reader to maintain.
+
+This says nothing about `require_gerrit`, which the workflow keeps. That
+gate verifies a tag's signing key against a Gerrit account and plays no
+part in checkout.
+
+Gerrit-mirrored projects use this workflow unchanged. The release tag
+replicates from Gerrit to the GitHub mirror and the push triggers the
+caller. What differs for a Gerrit project is where signing keys get
+verified — see `require_gerrit` in the gates table below, and
+`examples/release/gerrit.yaml`.
 
 ## Release gates
 
@@ -79,7 +94,6 @@ tag pushed months ago, or a tag pointing at an outdated commit.
 | `mark_latest`                                                        | `true`                | Mark the promoted release as the repository's `latest`                                        |
 | `harden_runner_egress`                                               | `block`               | `block` or `audit`                                                                            |
 | `harden_runner_allowlist`                                            | central org list      | Out-of-band harden-runner allow-list configuration                                            |
-| `gerrit_refspec` / `gerrit_project` / `gerrit_branch` / `gerrit_url` | `''`                  | Gerrit-aware checkout inputs; `gerrit_url` falls back to the `GERRIT_URL` repository variable |
 
 <!-- markdownlint-enable MD013 -->
 
