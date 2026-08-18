@@ -145,7 +145,7 @@ on:
         required: false
         type: string
         # yamllint disable-line rule:line-length
-        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@4e6952177b00e11f15cdc7098fd68e38881c9c39'  # v0.14.0
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@c37ce972bcc98458c52337f7fec7cf0b54fd8fa3'  # v0.15.0
 
     outputs:
       # Both values are drawn from a fixed vocabulary computed by the
