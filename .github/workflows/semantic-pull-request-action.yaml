@@ -1,0 +1,65 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# =============================================================================
+# Thin semantic pull request caller
+# =============================================================================
+# This repository consumes its own reusable workflow, so every pull
+# request raised here exercises the code shipped to consumers: a
+# regression in semantic-pull-request.yaml turns this repository's own
+# check red instead of surfacing first in a downstream project.
+#
+# The reusable is referenced by LOCAL path, so the branch's own copy
+# runs and no self-pin is needed. Consumers pin a released SHA instead,
+# as examples/semantic-pull-request/github.yaml shows.
+#
+# The '-action' suffix is a local disambiguator: a caller in this
+# repository cannot share a file name with the reusable it calls.
+# Consuming repositories name the file semantic-pull-request.yaml.
+#
+# The workflow name, the job name and the concurrency group all carry a
+# '(self)' marker, which consuming repositories should NOT copy. The
+# organisation's mandatory-workflows ruleset injects a required workflow
+# named 'Semantic Pull Request 🛠️' into this repository. Two workflows
+# sharing a name share a concurrency group, because github.workflow
+# resolves to the NAME, so an unmarked caller here computed the same
+# group as the injected one and was cancelled before it ran — leaving a
+# cancelled check run beside a successful one for the same head SHA.
+# The markers also keep the two check runs told apart in the meantime.
+# =============================================================================
+name: 'Semantic Pull Request (self) 🛠️'
+
+# yamllint disable-line rule:truthy
+on:
+  # No workflow_dispatch: the underlying action infers the pull request
+  # from the event payload and fails on any other event.
+  pull_request:
+    types: [opened, reopened, edited, synchronize]
+
+permissions: {}
+
+# A literal group rather than '${{ github.workflow }}-…', so a workflow
+# elsewhere that happens to share this one's name cannot collide with
+# it. Never cancel, and queue rather than replace: a cancelled check
+# run sitting beside a successful one for the same head SHA muddies
+# the merge box, and blocks ruleset evaluation wherever the check is a
+# required one. 'queue: max' is what covers a burst, because the
+# default 'single' queue cancels the pending run when a third event
+# arrives.
+concurrency:
+  group: 'semantic-pull-request-self-${{ github.ref }}'
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  semantic-pull-request:
+    name: 'Semantic Pull Request (self)'
+    permissions:
+      contents: read
+      pull-requests: read  # Read PR title and commits (avoids 403)
+    uses: ./.github/workflows/semantic-pull-request.yaml
+    # No `with:` block: this repository adopts the organisation's
+    # Conventional Commits policy unmodified, which is what the
+    # reusable's defaults encode. Overriding here would mean shipping a
+    # policy we do not ourselves run.

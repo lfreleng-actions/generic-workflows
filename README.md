@@ -86,6 +86,73 @@ All inputs are optional and default to the gating policy above. See
 [`docs/release.md`](docs/release.md) for the full input/output reference
 and the job graph.
 
+## Semantic pull request reusable workflow
+
+[`.github/workflows/semantic-pull-request.yaml`](.github/workflows/semantic-pull-request.yaml)
+checks that a pull request title follows the Conventional Commits
+convention, using the organisation's capitalised type vocabulary. A
+thin `semantic-pull-request.yaml` caller in each repository runs on
+pull request events and delegates to it. The workflow migrated from
+`lfit/releng-reusable-workflows`, which it replaces.
+
+On top of a bare call to
+[`amannn/action-semantic-pull-request`](https://github.com/amannn/action-semantic-pull-request)
+it adds one thing the action cannot express: a narrow exception for
+Dependabot's truncated single-commit subjects.
+
+Dependabot shortens a long commit subject by deleting the
+`from <old> to <new>` version fragment while the pull request title
+keeps it, so the two differ and the exact single-commit match fails on
+a bump nobody can fix without rewriting Dependabot's commit. The gate
+step recognises that specific deletion — one contiguous span, on
+whitespace boundaries, reading `from <old> to <new>` — and relaxes the
+match for it alone. Genuine drift, such as a title updated to a newer
+version while the commit subject keeps the old one, still fails.
+
+<!-- markdownlint-disable MD013 -->
+
+| Input                                     | Type      | Default              | Effect                                               |
+| ----------------------------------------- | --------- | -------------------- | ---------------------------------------------------- |
+| `types`                                   | `string`  | 11 capitalised types | Newline-separated allowed Conventional Commit types  |
+| `scopes` / `disallow_scopes`              | `string`  | `''`                 | Newline-separated scope allow-list and deny-list     |
+| `require_scope`                           | `boolean` | `false`              | Require every title to carry a scope                 |
+| `subject_pattern`                         | `string`  | `''`                 | Regex the subject must match                         |
+| `ignore_labels`                           | `string`  | `''`                 | Newline-separated labels that skip validation        |
+| `validate_single_commit`                  | `boolean` | `true`               | Check the message on single-commit pull requests     |
+| `validate_single_commit_matches_pr_title` | `boolean` | `true`               | Require the single commit subject to match the title |
+| `dependabot_relax`                        | `boolean` | `true`               | Allow the Dependabot version-fragment exception      |
+
+<!-- markdownlint-enable MD013 -->
+
+Copy the caller from
+[`examples/semantic-pull-request/`](examples/semantic-pull-request/)
+into your project's `.github/workflows/` directory as
+`semantic-pull-request.yaml` and pin the `uses:` ref to a
+`generic-workflows` release SHA:
+
+```yaml
+jobs:
+  semantic-pull-request:
+    name: 'Semantic Pull Request'
+    permissions:
+      contents: read
+      pull-requests: read  # read PR title and commits (avoids 403)
+    # Pin a real generic-workflows release SHA in place of <SHA>.
+    uses: lfreleng-actions/generic-workflows/.github/workflows/semantic-pull-request.yaml@<SHA>
+```
+
+Keep the file name, job id and job name as the example has them: a
+ruleset matches a required status check by name, and renaming any of
+them detaches the ruleset from the check it gates.
+
+`pull-requests: read` is not optional. A called workflow cannot hold
+more permission than its caller, so the calling job declares the grant
+the reusable needs to read the pull request and its commits.
+
+See [`docs/semantic-pull-request.md`](docs/semantic-pull-request.md)
+for the full input/output reference, the exception rule in detail, and
+the migration notes.
+
 ## Cache housekeeping reusable workflow
 
 [`.github/workflows/clear-action-cache.yaml`](.github/workflows/clear-action-cache.yaml)
@@ -145,16 +212,18 @@ keeps a `choice` input of its own and passes the value through.
 ## Caller filenames
 
 A consuming repository names its callers after the reusable it calls:
-`release.yaml` and `clear-action-cache.yaml`. The callers in this
-repository carry an `-action` suffix (`release-action.yaml`,
+`release.yaml`, `semantic-pull-request.yaml` and
+`clear-action-cache.yaml`. The callers in this repository carry an
+`-action` suffix (`release-action.yaml`,
+`semantic-pull-request-action.yaml`,
 `clear-action-cache-action.yaml`) because a caller here cannot share a
 filename with the reusable it calls. Do not copy that suffix into a
 consuming repository.
 
 ## Gerrit support
 
-Gerrit-mirrored projects use these workflows unchanged. Neither reusable
-here takes Gerrit *checkout* inputs, and neither performs a dual
+Gerrit-mirrored projects use these workflows unchanged. None of the
+reusables here takes Gerrit *checkout* inputs, and none performs a dual
 checkout. The release reusable keeps `require_gerrit`, which verifies a
 tag's signing key against a Gerrit account and has nothing to do with
 checkout.
@@ -173,12 +242,17 @@ signing keys get verified: see `examples/release/gerrit.yaml`, which
 sets `require_gerrit: 'true'` and `require_github: 'false'`.
 
 Cache housekeeping acts on the GitHub mirror's Actions caches, which
-have no counterpart in Gerrit.
+have no counterpart in Gerrit. The semantic pull request check carries
+no Gerrit inputs either, and cannot: Gerrit projects review changes in
+Gerrit, so their GitHub mirror receives no pull requests for it to
+read.
 
 ## Design
 
 See [`docs/release.md`](docs/release.md) for the release reusable
-workflow's full input/output reference and job graph.
+workflow's full input/output reference and job graph, and
+[`docs/semantic-pull-request.md`](docs/semantic-pull-request.md) for
+the semantic pull request reusable workflow.
 
 [pre-commit.ci results page]: https://results.pre-commit.ci/latest/github/lfreleng-actions/generic-workflows/main
 [pre-commit.ci status badge]: https://results.pre-commit.ci/badge/github/lfreleng-actions/generic-workflows/main.svg
