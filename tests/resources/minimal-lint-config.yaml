@@ -1,0 +1,35 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Fixture for the run-all self-test in linting-action.yaml.
+#
+# The reusable's DEFAULT runs every hook in the configuration, which
+# reaches the executor as 'run_all_hooks: true' through a GitHub
+# expression:
+#
+#   run_all_hooks: ${{ matrix.hooks == '' && 'true' || 'false' }}
+#
+# The resolver fixtures in tests/test-lint-plan.sh check the JSON that
+# expression reads, but not the expression itself, nor the action
+# invocation it feeds. A broken one would produce a green self-test
+# with the default path never exercised.
+#
+# Naming this file as config_path selects the run-all mode against a
+# single trivial hook, so the wiring runs end to end for the price of
+# one matrix entry rather than a second full lint of the repository --
+# which pre-commit.ci already performs on the same pull request.
+#
+# Deliberately NOT named .pre-commit-config.yaml, so prek's workspace
+# discovery leaves it alone and this repository's own hooks are
+# unaffected.
+
+repos:
+  - repo: local
+    hooks:
+      - id: run-all-self-test
+        name: 'Run-all self-test hook'
+        entry: 'true'
+        language: system
+        pass_filenames: false
+        always_run: true
