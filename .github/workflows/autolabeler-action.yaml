@@ -1,0 +1,92 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# =============================================================================
+# Thin autolabeler caller
+# =============================================================================
+# This repository consumes its own reusable workflow, so a pull request
+# raised from a BRANCH OF THIS REPOSITORY exercises the code shipped to
+# consumers: a regression in autolabeler.yaml turns this repository's
+# own labelling red instead of surfacing first in a downstream project.
+#
+# That guarantee does NOT extend to a pull request raised from a fork.
+# Such a pull request is routed down the pull_request_target path, and
+# pull_request_target loads the caller and the local reusable it names
+# from the BASE branch, never from the pull request head. A green run
+# there says the merged code works, not the proposed code. The
+# pull_request path, which would carry the proposed code, is skipped
+# for fork pull requests by the reusable's routing condition. So where
+# contributors work from forks, treat this caller as protection for
+# main after merge rather than as a pre-merge check.
+#
+# The reusable is referenced by LOCAL path, so the branch's own copy
+# runs and no self-pin is needed. Consumers pin a released SHA instead,
+# as examples/autolabeler/github.yaml shows.
+#
+# The '-action' suffix is a local disambiguator: a caller in this
+# repository cannot share a file name with the reusable it calls.
+# Consuming repositories name the file autolabeler.yaml.
+#
+# The workflow name, the job name and the concurrency group all carry a
+# '(self)' marker, which consuming repositories should NOT copy. The
+# organisation's mandatory-workflows ruleset injects a required workflow
+# named 'Auto Label 🏷️' into this repository. Two workflows sharing a
+# name share a concurrency group, because github.workflow resolves to
+# the NAME, so an unmarked caller here would compute the same group as
+# the injected one and be cancelled before it ran. The markers also keep
+# the two check runs told apart in the meantime.
+#
+# Both copies labelling the same pull request is harmless: applying a
+# label twice is idempotent.
+# =============================================================================
+name: 'Auto Label (self) 🏷️'
+
+# yamllint disable-line rule:truthy
+on:
+  # pull_request covers same-repository pull requests.
+  #
+  # 'edited' is load-bearing: the organisation's release-drafter
+  # configuration matches every rule against the pull request TITLE, so
+  # a title corrected after opening needs a fresh run to pick up the
+  # label it now earns.
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  # pull_request_target covers fork pull requests, which pull_request
+  # cannot label because GitHub hands it a read-only token.
+  #
+  # Silencing zizmor's dangerous-triggers audit is correct here: the
+  # reusable checks out nothing, so pull request head source never
+  # reaches the runner. See the SECURITY note in
+  # .github/workflows/autolabeler.yaml for the full rationale.
+  pull_request_target:  # zizmor: ignore[dangerous-triggers]
+    types: [opened, synchronize, reopened, edited]
+
+permissions: {}
+
+# A literal group rather than '${{ github.workflow }}-…', so a workflow
+# elsewhere that happens to share this one's name cannot collide with
+# it.
+#
+# github.event_name is load-bearing and must stay in the key: this
+# workflow triggers on both pull_request and pull_request_target for the
+# same pull request, and a shared group would have one cancel the other.
+# github.ref cannot replace the pull request number either, because on
+# pull_request_target it resolves to the base branch and would serialise
+# every open pull request into one group.
+concurrency:
+  # yamllint disable-line rule:line-length
+  group: 'autolabeler-self-${{ github.event_name }}-pr-${{ github.event.pull_request.number }}'
+  cancel-in-progress: true
+
+jobs:
+  autolabel:
+    name: 'Label PR (self)'
+    permissions:
+      contents: read  # Read the release-drafter config from the repo
+      pull-requests: write  # Apply labels to the pull request
+    uses: ./.github/workflows/autolabeler.yaml
+    # No `with:` block: this repository adopts the organisation's
+    # labelling policy unmodified, which is what the reusable's defaults
+    # encode. Overriding here would mean shipping a policy we do not
+    # ourselves run.

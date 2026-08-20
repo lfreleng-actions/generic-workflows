@@ -1,0 +1,202 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Reusable pull request autolabeler.
+#
+# Applies labels to a pull request from the rules in a release-drafter
+# configuration, behind a block-mode harden-runner step. Release
+# Drafter reads those labels afterwards to sort the draft release notes
+# into categories and to resolve the next version, so the labelling
+# step is what makes both come out right.
+#
+# CALLER REQUIREMENTS
+#
+#   * Trigger on BOTH pull_request and pull_request_target, types
+#     [opened, synchronize, reopened, edited]. The job below keys off
+#     github.event_name and the head repository's fork flag, so a
+#     same-repository pull request gets labelled through pull_request
+#     and a fork pull request through pull_request_target, without a
+#     duplicate run. Dropping pull_request_target stops fork pull
+#     requests being labelled at all; dropping pull_request routes
+#     same-repository pull requests through the elevated trigger for no
+#     benefit. 'edited' matters because release-drafter matches most
+#     rules against the pull request TITLE, and the organisation's
+#     configuration matches on title alone: without it, a title
+#     corrected after opening keeps whatever labels the original
+#     earned, and a title that gained its Conventional Commits prefix
+#     on the second attempt never gets labelled.
+#   * Grant pull-requests: write and contents: read on the calling job.
+#     A called workflow never holds more permission than its caller.
+#   * Mark the pull_request_target trigger with
+#     '# zizmor: ignore[dangerous-triggers]'. A reusable workflow has no
+#     trigger of its own to carry that comment, so the finding lands on
+#     the caller. The SECURITY note below explains why silencing it is
+#     the right call.
+#   * Provide a release-drafter configuration at .github/<config_name>,
+#     or lean on the organisation-level copy in the .github repository,
+#     which release-drafter falls back to when the repository has none.
+#
+# SECURITY: a pull_request_target caller is safe here.
+#   1. The lane has no checkout step, so pull request head source never
+#      reaches the runner, let alone executes.
+#   2. pull_request_target loads the workflow body from the base
+#      branch, and a pinned 'uses:' ref fixes the content of this file.
+#   3. Every step pins a commit SHA and runs trusted code.
+#      harden-runner-block-action fetches one allow-list file and
+#      publishes it; harden-runner installs the egress filter;
+#      release-drafter's autolabeler makes GitHub API calls against
+#      pull request metadata. None of the three reads or runs head
+#      source.
+#   4. Permissions stop at pull-requests: write and contents: read, and
+#      the egress block lands before the autolabeler step runs.
+#
+# Call this from a thin caller workflow; see examples/autolabeler/
+name: '[R] Auto Label 🏷️'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_call:
+    inputs:
+      # --- Label rules ---
+      config_name:
+        description: >-
+          release-drafter configuration file, resolved under .github/
+          in the calling repository. When that file is absent,
+          release-drafter falls back to the same path in the
+          organisation's .github repository.
+        required: false
+        type: string
+        default: 'release-drafter.yml'
+
+      # --- Runner selection and timeout ---
+      runs_on:
+        description: >-
+          Runner label for the job. Must be a LINUX runner:
+          harden-runner enforces an egress policy on Linux alone, and
+          anything else would run unhardened.
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+      timeout_minutes:
+        description: 'Timeout (minutes) for the job'
+        required: false
+        type: number
+        default: 3
+
+      # --- Runner hardening ---
+      harden_runner_egress:
+        description: "Harden-runner egress policy: 'block' or 'audit'"
+        required: false
+        type: string
+        default: 'block'
+      harden_runner_allowlist:
+        description: 'Out-of-band harden-runner allow-list configuration'
+        required: false
+        type: string
+        # yamllint disable-line rule:line-length
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@c37ce972bcc98458c52337f7fec7cf0b54fd8fa3'  # v0.15.0
+
+    secrets:
+      token:
+        description: >-
+          Token the autolabeler authenticates with. Empty falls back to
+          the job's GITHUB_TOKEN, which suits nearly every repository.
+          Supply a token where labels must carry a different identity,
+          or where a downstream workflow has to react to the labelling
+          event (GITHUB_TOKEN activity raises no further workflow run).
+        required: false
+
+permissions: {}
+
+# No concurrency block, deliberately.
+#
+# A literal group would serialise labelling across every open pull
+# request, and a per-pull-request group buys nothing a caller cannot
+# express. Concurrency belongs to the caller, which must keep
+# github.event_name in the group key: this lane expects both
+# pull_request and pull_request_target for the same pull request, and a
+# shared group would have one cancel the other. github.ref cannot stand
+# in for the pull request number either, because on pull_request_target
+# it resolves to the base branch and would collapse every open pull
+# request into one group. See examples/autolabeler/github.yaml.
+
+jobs:
+  autolabel:
+    name: 'Label PR'
+    # Take pull_request_target for pull requests raised from another
+    # repository, and pull_request for those raised from a branch of
+    # this one. Both events fire for a cross-repository pull request,
+    # so without this condition the lane would label it twice; and
+    # pull_request alone cannot label one, because GitHub hands it a
+    # token without write access.
+    #
+    # The comparison is head repository against BASE repository, not
+    # 'head.repo.fork'. That flag reports whether the head repository
+    # is itself a fork of something, which is a different question: in
+    # a repository that is itself a fork, every same-repository pull
+    # request sets it, and keying on it would route ordinary internal
+    # pull requests down the elevated trigger. Both fields come from
+    # the event payload, so this works the same way in a called
+    # workflow, where 'github.repository' would name the caller.
+    # yamllint disable rule:line-length
+    if: >
+      (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name) ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.event.pull_request.base.repo.full_name)
+    # yamllint enable rule:line-length
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    permissions:
+      contents: read  # Read the release-drafter config from the repo
+      pull-requests: write  # Apply labels to the pull request
+    steps:
+      # Load the egress allow-list out-of-band and publish it as
+      # $CONNECTION_ALLOW_LIST for the harden-runner step below. Loading
+      # it this way keeps the source independent of any org-level GitHub
+      # variable, which a workflow triggered by a fork pull request
+      # cannot read.
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+
+      # One harden-runner step with the policy computed, rather than
+      # two selected by condition: harden-runner declares a 'pre' entry
+      # point and no 'pre-if', so its pre-phase runs whatever a
+      # step-level 'if:' says. With both present the first won, and
+      # audit mode stayed unreachable however the caller asked for it.
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40  # v2.20.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ (inputs.harden_runner_egress == 'audit') && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      # harden-runner enforces an egress policy on Linux only. On any
+      # other runner it degrades to a warning, and this job would go on
+      # to apply labels holding pull-requests: write on an unhardened
+      # runner while still reporting success. Stop instead. RUNNER_OS is
+      # exact where matching on the runs_on label would guess.
+      - name: 'Require a Linux runner'
+        shell: bash
+        run: |
+          if [ "${RUNNER_OS}" != 'Linux' ]; then
+            echo "::error::runs_on must name a Linux runner:" \
+              "harden-runner enforces an egress policy on Linux only" \
+              "(RUNNER_OS=${RUNNER_OS})"
+            exit 1
+          fi
+
+      - name: 'Apply pull request labels'
+        # yamllint disable-line rule:line-length
+        uses: release-drafter/release-drafter/autolabeler@34d80673e067bdc0c24568d3af899c216adcfaa9  # v7.7.0
+        with:
+          config-name: ${{ inputs.config_name }}
+          # The action reads its 'token' INPUT, which defaults to
+          # github.token. Setting a GITHUB_TOKEN environment variable
+          # instead leaves that default in place, so the token input is
+          # where an overriding secret has to arrive.
+          token: ${{ secrets.token || secrets.GITHUB_TOKEN }}
