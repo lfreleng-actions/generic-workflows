@@ -209,16 +209,88 @@ declares the grant.
 `choice`, so `dry_run` takes a boolean. A caller wanting a dispatch menu
 keeps a `choice` input of its own and passes the value through.
 
+## Autolabeler reusable workflow
+
+[`.github/workflows/autolabeler.yaml`](.github/workflows/autolabeler.yaml)
+applies labels to a pull request from the rules in a release-drafter
+configuration. A thin `autolabeler.yaml` caller in each repository runs
+on pull request events and delegates to it. The workflow migrated from
+`lfit/releng-reusable-workflows`, which it replaces.
+
+Those labels reach further than the pull request view. Release Drafter
+reads them later to sort entries into release-note categories and to
+resolve the next version, because each category in the organisation's
+configuration carries its own `semver-increment`.
+
+<!-- markdownlint-disable MD013 -->
+
+| Input                     | Type     | Default               | Effect                                              |
+| ------------------------- | -------- | --------------------- | --------------------------------------------------- |
+| `config_name`             | `string` | `release-drafter.yml` | Config file resolved under `.github/`               |
+| `runs_on`                 | `string` | `ubuntu-latest`       | Runner label; Linux, because harden-runner needs it |
+| `timeout_minutes`         | `number` | `3`                   | Job timeout                                         |
+| `harden_runner_egress`    | `string` | `block`               | Egress policy: `block` or `audit`                   |
+| `harden_runner_allowlist` | `string` | `.github` v0.15.0     | Out-of-band allow-list coordinate                   |
+
+<!-- markdownlint-enable MD013 -->
+
+A caller must trigger on **both** `pull_request` and
+`pull_request_target`, the detail callers get wrong more than any
+other. GitHub hands a `pull_request` run a token without write access
+when the pull request comes from a fork, so labelling fails there;
+`pull_request_target` can label a fork pull request but is the more
+dangerous trigger. The reusable's job condition routes each pull
+request down a single path, so a fork pull request runs through
+`pull_request_target`, a same-repository one through `pull_request`,
+and neither runs twice.
+
+Use `types: [opened, synchronize, reopened, edited]` on both. Release
+Drafter matches the organisation's autolabeler rules against the pull
+request **title**, so without `edited` a title corrected after opening
+keeps whatever labels the original earned, and a pull request that
+gained its Conventional Commits prefix on the second attempt stays
+unlabelled.
+
+That `pull_request_target` usage is safe because the lane checks
+nothing out: head-branch source never reaches the runner. zizmor still
+raises `dangerous-triggers` on the caller, since a reusable workflow
+has no trigger of its own to annotate, so the example silences it on
+the `pull_request_target` line.
+
+Copy the caller from [`examples/autolabeler/`](examples/autolabeler/)
+into your project's `.github/workflows/` directory as
+`autolabeler.yaml` and pin the `uses:` ref to a `generic-workflows`
+release SHA:
+
+```yaml
+jobs:
+  autolabel:
+    name: 'Label PR'
+    permissions:
+      contents: read  # read the release-drafter config from the repo
+      pull-requests: write  # apply labels to the pull request
+    # Pin a real generic-workflows release SHA in place of <SHA>.
+    uses: lfreleng-actions/generic-workflows/.github/workflows/autolabeler.yaml@<SHA>
+```
+
+The reusable needs both grants. A called workflow cannot hold more
+permission than its caller, so the calling job declares them on the
+reusable's behalf.
+
+See [`docs/autolabeler.md`](docs/autolabeler.md) for the full
+input/secret reference, the trigger routing table, and the migration
+notes.
+
 ## Caller filenames
 
 A consuming repository names its callers after the reusable it calls:
-`release.yaml`, `semantic-pull-request.yaml` and
-`clear-action-cache.yaml`. The callers in this repository carry an
+`release.yaml`, `semantic-pull-request.yaml`, `clear-action-cache.yaml`
+and `autolabeler.yaml`. The callers in this repository carry an
 `-action` suffix (`release-action.yaml`,
 `semantic-pull-request-action.yaml`,
-`clear-action-cache-action.yaml`) because a caller here cannot share a
-filename with the reusable it calls. Do not copy that suffix into a
-consuming repository.
+`clear-action-cache-action.yaml`, `autolabeler-action.yaml`) because a
+caller here cannot share a filename with the reusable it calls. Do not
+copy that suffix into a consuming repository.
 
 ## Gerrit support
 
@@ -245,14 +317,16 @@ Cache housekeeping acts on the GitHub mirror's Actions caches, which
 have no counterpart in Gerrit. The semantic pull request check carries
 no Gerrit inputs either, and cannot: Gerrit projects review changes in
 Gerrit, so their GitHub mirror receives no pull requests for it to
-read.
+read. The autolabeler is out for the same reason, having no pull
+request to label.
 
 ## Design
 
 See [`docs/release.md`](docs/release.md) for the release reusable
-workflow's full input/output reference and job graph, and
+workflow's full input/output reference and job graph,
 [`docs/semantic-pull-request.md`](docs/semantic-pull-request.md) for
-the semantic pull request reusable workflow.
+the semantic pull request reusable workflow, and
+[`docs/autolabeler.md`](docs/autolabeler.md) for the autolabeler.
 
 [pre-commit.ci results page]: https://results.pre-commit.ci/latest/github/lfreleng-actions/generic-workflows/main
 [pre-commit.ci status badge]: https://results.pre-commit.ci/badge/github/lfreleng-actions/generic-workflows/main.svg

@@ -1,0 +1,108 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# =============================================================================
+# EXAMPLE: caller for the reusable autolabeler workflow
+# =============================================================================
+# Copy this file into your project's .github/workflows/ directory as
+# autolabeler.yaml and pin the `uses:` ref to a generic-workflows
+# release SHA.
+#
+# This replaces the caller that pointed at
+# lfit/releng-reusable-workflows/.github/workflows/
+# reuse-autolabeler.yaml. Keep the workflow file name, the job id and
+# the job name exactly as they are below: a required status check is
+# matched by name, and renaming any of them detaches the ruleset from
+# the check it is meant to gate.
+#
+# DEPLOYMENT NOTES:
+#   * Needs no secrets. The job's GITHUB_TOKEN is enough.
+#   * BOTH triggers are required, and so is the `edited` type. The
+#     reusable routes a same-repository pull request through
+#     pull_request and a fork pull request through
+#     pull_request_target, and runs once either way. Drop
+#     pull_request_target and fork pull requests stop being labelled,
+#     silently. Drop `edited` and a title corrected after opening keeps
+#     whatever labels the original earned, because release-drafter
+#     matches its rules against the pull request title.
+#   * `pull-requests: write` is not optional, and neither is
+#     `contents: read`: a called workflow's token cannot exceed its
+#     caller's, so the calling job declares both on the reusable's
+#     behalf.
+#   * The `# zizmor: ignore[dangerous-triggers]` comment belongs on the
+#     pull_request_target line. A reusable workflow has no trigger of
+#     its own to carry it, so the finding lands here.
+#   * Label rules come from `.github/release-drafter.yml`. When your
+#     repository has no copy, release-drafter falls back to the same
+#     path in your organisation's `.github` repository.
+#   * If the organisation's mandatory-workflows ruleset already injects
+#     a required 'Auto Label' workflow into your repository, you do not
+#     need this caller at all. Adding it labels each pull request twice,
+#     which is harmless but redundant. Adopt this caller only where no
+#     such requirement applies, or once the injected copy has gone.
+#   * There is no Gerrit variant of this caller. Gerrit projects review
+#     changes in Gerrit; their GitHub mirror receives no pull requests
+#     to label.
+# =============================================================================
+name: 'Auto Label 🏷️'
+
+# yamllint disable-line rule:truthy
+on:
+  # pull_request covers same-repository pull requests.
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  # pull_request_target covers fork pull requests, which pull_request
+  # cannot label because GitHub hands it a read-only token.
+  #
+  # Silencing zizmor's dangerous-triggers audit is correct here: the
+  # reusable checks out nothing, so pull request head source never
+  # reaches the runner, and the workflow body comes from the base
+  # branch at a pinned ref.
+  pull_request_target:  # zizmor: ignore[dangerous-triggers]
+    types: [opened, synchronize, reopened, edited]
+
+permissions: {}
+
+# A literal group, NOT '${{ github.workflow }}-${{ github.ref }}'.
+# github.workflow resolves to the workflow NAME, so any other workflow
+# in the repository carrying this same name would compute the same
+# group and one of the two would be cancelled.
+#
+# Keep github.event_name in the key. This workflow triggers on both
+# pull_request and pull_request_target for the same pull request, and a
+# shared group would have one cancel the other. github.ref cannot
+# replace the pull request number either: on pull_request_target it
+# resolves to the base branch, which would serialise every open pull
+# request into a single group.
+concurrency:
+  # yamllint disable-line rule:line-length
+  group: 'autolabeler-${{ github.event_name }}-pr-${{ github.event.pull_request.number }}'
+  # Cancelling is safe here, unlike the semantic pull request check.
+  # Labelling is idempotent and publishes no check run that a ruleset
+  # evaluates, so a superseded run leaves nothing behind for the merge
+  # box to report.
+  cancel-in-progress: true
+
+jobs:
+  autolabel:
+    name: 'Label PR'
+    permissions:
+      contents: read  # Read the release-drafter config from the repo
+      pull-requests: write  # Apply labels to the pull request
+    # REPLACE the pinned SHA below with a generic-workflows release SHA.
+    # The all-zero SHA is a non-functional placeholder, NOT a real commit.
+    # yamllint disable-line rule:line-length
+    uses: lfreleng-actions/generic-workflows/.github/workflows/autolabeler.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
+    # All inputs are optional. Uncomment only what you need; stripping
+    # the '# ' prefix leaves valid YAML at the right indent.
+    # with:
+    #   config_name: 'release-drafter.yml'
+    #   runs_on: 'ubuntu-latest'   # Linux only
+    #   timeout_minutes: 3
+    #   harden_runner_egress: 'block'
+    # A token is needed only where labels must carry a different
+    # identity, or where another workflow has to react to the labelling
+    # (GITHUB_TOKEN activity raises no further workflow run).
+    # secrets:
+    #   token: ${{ secrets.MY_LABELLING_TOKEN }}
