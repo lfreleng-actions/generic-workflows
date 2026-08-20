@@ -90,3 +90,21 @@ paths:
   examples/semantic-pull-request/github.yaml:
     ignore:
       - 'unexpected key "queue" for "concurrency" section'
+
+  .github/workflows/linting-action.yaml:
+    ignore:
+      # Same 'queue' concurrency key as above; see that comment.
+      - 'unexpected key "queue" for "concurrency" section'
+      # Same self-repository form as the callers above, and excused
+      # the same way; see that comment. One pattern covers all three
+      # jobs here, because it names the workflow being called rather
+      # than the call site.
+      # yamllint disable-line rule:line-length
+      - 'reusable workflow call "\$/\.github/workflows/linting\.yaml" at "uses" is not following the format'
+
+  # And the linting example caller, for the same reason as its
+  # semantic-pull-request sibling: it carries the same concurrency
+  # block and is linted now that the hook covers examples/.
+  examples/linting/github.yaml:
+    ignore:
+      - 'unexpected key "queue" for "concurrency" section'
