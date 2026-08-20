@@ -153,6 +153,79 @@ See [`docs/semantic-pull-request.md`](docs/semantic-pull-request.md)
 for the full input/output reference, the exception rule in detail, and
 the migration notes.
 
+## Linting reusable workflow
+
+[`.github/workflows/linting.yaml`](.github/workflows/linting.yaml)
+runs pre-commit hooks with [prek](https://github.com/j178/prek),
+standalone from pre-commit.ci. A thin `linting.yaml` caller in each
+repository runs on pull request events and delegates to it. The
+workflow supersedes `compose-repo-linting.yaml` in
+`lfit/releng-reusable-workflows`.
+
+It targets the hooks pre-commit.ci cannot run. That sandbox blocks
+network access at scan time and caps hook environment size, so hooks
+such as `gha-workflow-linter` or `aislop` end up listed under
+`ci.skip` in a repository's `.pre-commit-config.yaml` and never run in
+CI at all. With no inputs, this workflow runs that set, one parallel
+job per hook.
+
+The design assumes estate-wide adoption from an organisation ruleset,
+so a repository with nothing extra to lint costs close to nothing: a
+sparse checkout of the configuration file alone, then a grep
+pre-filter, and then any tooling. When nothing resolves, the
+lint matrix never instantiates and the run ends green without
+blocking a merge.
+
+A green check must always mean "linted, nothing wrong", never "could
+not tell". The pre-filter uses a loose substring test by design, and
+an absent organisation fallback means an HTTP 404 and nothing else;
+any other failure to read one stops the job rather than reporting
+success.
+
+<!-- markdownlint-disable MD013 -->
+
+| Input                 | Type      | Default                           | Effect                                                         |
+| --------------------- | --------- | --------------------------------- | -------------------------------------------------------------- |
+| `plan`                | `string`  | `''`                              | JSON array of lint tasks; exclusive with the scalars           |
+| `hooks`               | `string`  | `''`                              | Space/comma separated hook ids to run                          |
+| `config_path`         | `string`  | `''`                              | Repository-relative configuration path                         |
+| `config_url`          | `string`  | `''`                              | HTTPS configuration URL                                        |
+| `config_sha256`       | `string`  | `''`                              | Expected digest; requires `config_url`                         |
+| `org_fallback`        | `boolean` | `true`                            | Fall back to the organisation's `.github` repository           |
+| `org_config_path`     | `string`  | `linting/.pre-commit-config.yaml` | Fallback path inside that repository                           |
+| `split_hooks`         | `boolean` | `true`                            | One parallel matrix job per hook                               |
+| `export_github_token` | `boolean` | `true`                            | Export the workflow token to hooks; not on fork PR/merge_group |
+| `runs_on`             | `string`  | `ubuntu-slim`                     | Runner label; Linux alone                                      |
+
+<!-- markdownlint-enable MD013 -->
+
+The organisation fallback lets an estate keep one central
+configuration rather than a copy in every repository. It applies
+where a repository has none of its own, and needs the organisation's
+`.github` repository to be public.
+
+Copy the caller from [`examples/linting/`](examples/linting/) into
+your project's `.github/workflows/` directory as `linting.yaml` and
+pin the `uses:` ref to a `generic-workflows` release SHA:
+
+```yaml
+jobs:
+  linting:
+    name: 'Linting'
+    permissions:
+      contents: read
+    # Pin a real generic-workflows release SHA in place of <SHA>.
+    uses: lfreleng-actions/generic-workflows/.github/workflows/linting.yaml@<SHA>
+```
+
+Trigger on `pull_request` or `push`, and nothing else. The reusable
+**refuses** `pull_request_target`, which would run repository-defined
+tools against fork code under a base-repository token.
+
+See [`docs/linting.md`](docs/linting.md) for the JSON plan format,
+the full input/output reference, the security model and the migration
+notes.
+
 ## Cache housekeeping reusable workflow
 
 [`.github/workflows/clear-action-cache.yaml`](.github/workflows/clear-action-cache.yaml)
@@ -284,10 +357,10 @@ notes.
 ## Caller filenames
 
 A consuming repository names its callers after the reusable it calls:
-`release.yaml`, `semantic-pull-request.yaml`, `clear-action-cache.yaml`
-and `autolabeler.yaml`. The callers in this repository carry an
-`-action` suffix (`release-action.yaml`,
-`semantic-pull-request-action.yaml`,
+`release.yaml`, `semantic-pull-request.yaml`, `linting.yaml`,
+`clear-action-cache.yaml` and `autolabeler.yaml`. The callers in this
+repository carry an `-action` suffix (`release-action.yaml`,
+`semantic-pull-request-action.yaml`, `linting-action.yaml`,
 `clear-action-cache-action.yaml`, `autolabeler-action.yaml`) because a
 caller here cannot share a filename with the reusable it calls. Do not
 copy that suffix into a consuming repository.
@@ -318,7 +391,8 @@ have no counterpart in Gerrit. The semantic pull request check carries
 no Gerrit inputs either, and cannot: Gerrit projects review changes in
 Gerrit, so their GitHub mirror receives no pull requests for it to
 read. The autolabeler is out for the same reason, having no pull
-request to label.
+request to label. The linting reusable takes no Gerrit checkout
+inputs; a Gerrit project calls it from a `push` trigger on the mirror.
 
 ## Design
 
@@ -326,7 +400,9 @@ See [`docs/release.md`](docs/release.md) for the release reusable
 workflow's full input/output reference and job graph,
 [`docs/semantic-pull-request.md`](docs/semantic-pull-request.md) for
 the semantic pull request reusable workflow, and
-[`docs/autolabeler.md`](docs/autolabeler.md) for the autolabeler.
+[`docs/linting.md`](docs/linting.md) for the linting reusable
+workflow, and [`docs/autolabeler.md`](docs/autolabeler.md) for the
+autolabeler.
 
 [pre-commit.ci results page]: https://results.pre-commit.ci/latest/github/lfreleng-actions/generic-workflows/main
 [pre-commit.ci status badge]: https://results.pre-commit.ci/badge/github/lfreleng-actions/generic-workflows/main.svg

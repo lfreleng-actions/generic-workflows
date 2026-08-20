@@ -20,3 +20,7 @@ paths:
       # (cancel-in-progress, group), so it reports the key as
       # unexpected. Remove this ignore once actionlint learns it.
       - 'unexpected key "queue" for "concurrency" section'
+  .github/workflows/linting-action.yaml:
+    ignore:
+      # Same 'queue' concurrency key as above; see that comment.
+      - 'unexpected key "queue" for "concurrency" section'
