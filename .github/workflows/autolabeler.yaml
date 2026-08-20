@@ -195,8 +195,20 @@ jobs:
         uses: release-drafter/release-drafter/autolabeler@34d80673e067bdc0c24568d3af899c216adcfaa9  # v7.7.0
         with:
           config-name: ${{ inputs.config_name }}
-          # The action reads its 'token' INPUT, which defaults to
-          # github.token. Setting a GITHUB_TOKEN environment variable
-          # instead leaves that default in place, so the token input is
-          # where an overriding secret has to arrive.
+          # Forwarded through the documented 'token' input rather than
+          # exported as a GITHUB_TOKEN environment variable. Both reach
+          # the action, and knowing which wins matters: its Octokit
+          # client authenticates from process.env.GITHUB_TOKEN, and the
+          # input schema copies the input into that variable ONLY when
+          # it is unset. An environment variable therefore takes
+          # precedence over this input. The input is the published
+          # contract, so the lane uses it and sets no variable, leaving
+          # one place for a token to arrive.
           token: ${{ secrets.token || secrets.GITHUB_TOKEN }}
+
+      # NOTE: this action only ever ADDS labels. It computes the set
+      # matching the configuration and calls issues.addLabels; nothing
+      # removes a label whose rule stopped matching. Retitling a pull
+      # request from one Conventional Commits type to another leaves
+      # the earlier label in place alongside the new one. See
+      # docs/autolabeler.md, 'Stale labels'.

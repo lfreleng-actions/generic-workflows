@@ -80,6 +80,10 @@ request stays unlabelled and so lands in no release-note category.
 `synchronize` does not cover this, because it fires on a push rather
 than on a metadata edit.
 
+`edited` reaches half the problem. It cannot correct a label that
+has become wrong, because the action never removes one. See
+[Stale labels](#stale-labels).
+
 ## Why `pull_request_target` is safe here
 
 Calling a workflow from a `pull_request_target` context deserves
@@ -137,12 +141,61 @@ labels that must carry a different identity, and a downstream workflow
 that has to react to the labelling event, since activity performed with
 `GITHUB_TOKEN` raises no further workflow run.
 
-The lane forwards this value to the action's `token` **input**. That
-detail matters: the action declares `token` with a default of
-`github.token`, and reads no `GITHUB_TOKEN` environment variable. A
-lane that exported the secret as an environment variable instead would
-leave the default in place, and the supplied token would go unused
-while appearing configured.
+The lane forwards this value to the action's `token` **input**, and
+sets no environment variable. Both routes reach the action, so which
+one wins is worth knowing. The action's Octokit client authenticates
+from `process.env.GITHUB_TOKEN`, and the shared input schema copies
+the `token` input into that variable **when nothing has set it**:
+
+```js
+// src/common/shared-input.schema.ts @ 34d80673
+if (data.token && !process.env.GITHUB_TOKEN) {
+  process.env.GITHUB_TOKEN = data.token
+}
+```
+
+So a `GITHUB_TOKEN` environment variable takes precedence over the
+input. Passing both would leave the input with no effect, and nothing
+would report that. The lane uses the published input alone, which
+leaves one place for a token to arrive.
+
+## Stale labels
+
+The action **adds** labels and never removes them. It builds the set
+matching the configuration and calls `issues.addLabels`; no code path
+drops a label whose rule stopped matching.
+
+That bounds what the `edited` trigger buys. `edited` fixes the case
+where a pull request carried no matching label and then earned one. It
+does nothing for a label that has become wrong:
+
+| Title change                 | Labels after     | Effect  |
+| ---------------------------- | ---------------- | ------- |
+| `Add X` → `Feat: Add X`      | `feature`        | Correct |
+| `Feat: Add X` → `Fix: Add X` | `feature`, `bug` | Wrong   |
+
+The second row matters more than it looks. The organisation's
+release-drafter categories are `exclusive: true` and match in
+definition order, highest `semver-increment` first. A pull request
+carrying both `feature` and `bug` matches the features category first,
+so a change retitled from `Feat:` to `Fix:` still resolves a **minor**
+version increment rather than a patch.
+
+Remove the superseded label by hand after retitling across types. The
+lane makes no attempt to reconcile labels itself: it holds
+`pull-requests: write`, and code that deletes labels could as readily
+remove one a maintainer applied by hand.
+
+## Dependabot pull requests
+
+These work, and need no special handling. Dependabot raises its
+branches inside the repository, so they take the `pull_request` route,
+and GitHub honours the `pull-requests: write` grant on the calling
+job. Verified against merged bumps in three repositories, where
+`Label PR` reports success and the `CI` label — which no source other
+than the title rule `/^ci(\([^)]+\))?:/i` produces — sits alongside the
+`dependencies` and `github_actions` labels that Dependabot applies
+itself.
 
 ## Config resolution
 
@@ -222,4 +275,11 @@ Replace the `uses:` coordinate and rename one input:
 <!-- markdownlint-enable MD013 -->
 
 The job name stays `Label PR`, so a ruleset or branch rule naming that
-check keeps matching it. The `token` secret carries over unchanged.
+check keeps matching it.
+
+The `token` secret carries over and behaves the same way. The old lane
+exported it as a `GITHUB_TOKEN` environment variable and this one
+passes the published `token` input; both reach the action's Octokit
+client, so a caller already supplying a token needs no change. See
+[Secrets](#secrets) for which of the two wins when a caller supplies
+both.
