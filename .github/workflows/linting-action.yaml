@@ -1,0 +1,63 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# =============================================================================
+# Thin linting caller
+# =============================================================================
+# This repository consumes its own reusable workflow, so every pull
+# request raised here exercises the code shipped to consumers: a
+# regression in linting.yaml turns this repository's own check red
+# instead of surfacing first in a downstream project.
+#
+# The reusable is referenced by LOCAL path, so the branch's own copy
+# runs and no self-pin is needed. Consumers pin a released SHA instead,
+# as examples/linting/github.yaml shows.
+#
+# The '-action' suffix is a local disambiguator: a caller in this
+# repository cannot share a file name with the reusable it calls.
+# Consuming repositories name the file linting.yaml.
+#
+# The workflow name, job name and concurrency group carry a '(self)'
+# marker, which consuming repositories should NOT copy: two workflows
+# sharing a name share a concurrency group, because github.workflow
+# resolves to the NAME, so an unmarked caller here would collide with
+# an organisation-injected workflow of the same name.
+#
+# No inputs: this exercises the estate-wide default path, which runs
+# the hooks this repository's .pre-commit-config.yaml lists under
+# 'ci.skip' (currently gha-workflow-linter).
+# =============================================================================
+name: 'Linting (self) 🧹'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions: {}
+
+# A literal group rather than '${{ github.workflow }}-…', so a
+# workflow elsewhere that happens to share this one's name cannot
+# collide with it. Never cancel, and queue rather than replace: a
+# cancelled check run sitting beside a successful one for the same
+# head SHA muddies the merge box, and blocks ruleset evaluation
+# wherever the check is a required one. 'queue: max' covers a burst,
+# because the default 'single' queue cancels the pending run when a
+# third event arrives.
+concurrency:
+  group: 'linting-self-${{ github.ref }}'
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  linting:
+    name: 'Linting (self)'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/linting.yaml
+    # No `with:` block: this repository adopts the estate-wide default
+    # behaviour unmodified, which is what the reusable's defaults
+    # encode. Overriding here would mean shipping a default we do not
+    # ourselves run.

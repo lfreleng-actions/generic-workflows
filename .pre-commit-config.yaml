@@ -127,6 +127,20 @@ repos:
           - yaml
       - id: check-readthedocs
 
+  # Fixtures for the shell decision rules in the locate step: the
+  # dangling-symlink walk and the organisation-fallback status
+  # mapping. Both decide whether linting runs at all, and neither is
+  # reachable from the Python resolver suite above.
+  - repo: local
+    hooks:
+      - id: locate-rules-fixtures
+        name: Locate rule fixtures
+        entry: tests/test-locate-rules.sh
+        language: script
+        pass_filenames: false
+        # yamllint disable-line rule:line-length
+        files: '^(\.github/workflows/linting\.yaml|tests/test-locate-rules\.sh)$'
+
   # Fixtures for the Dependabot single-commit title exception. The test
   # extracts the rule from the workflow, so it runs whenever either the
   # workflow or the fixtures change.
@@ -139,3 +153,19 @@ repos:
         pass_filenames: false
         # yamllint disable-line rule:line-length
         files: '^(\.github/workflows/semantic-pull-request\.yaml|tests/test-relax-matches\.sh)$'
+
+  # Fixtures for the lint plan resolver. The test extracts the resolver
+  # from the workflow, so it runs whenever either the workflow or the
+  # fixtures change. A 'language: python' hook rather than 'script':
+  # the resolver needs PyYAML, and pre-commit.ci's sandbox has neither
+  # uv nor the network to fetch one, so the environment must supply it.
+  - repo: local
+    hooks:
+      - id: lint-plan-fixtures
+        name: Lint plan resolver fixtures
+        entry: tests/test-lint-plan.sh
+        language: python
+        additional_dependencies: ['pyyaml==6.0.2']
+        pass_filenames: false
+        # yamllint disable-line rule:line-length
+        files: '^(\.github/workflows/linting\.yaml|tests/test-lint-plan\.sh)$'

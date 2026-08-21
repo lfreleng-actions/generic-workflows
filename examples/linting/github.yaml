@@ -1,0 +1,101 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# =============================================================================
+# EXAMPLE: caller for the reusable standalone linting workflow
+# =============================================================================
+# Copy this file into your project's .github/workflows/ directory as
+# linting.yaml and pin the `uses:` ref to a generic-workflows release
+# SHA.
+#
+# With no inputs the reusable runs the hooks your repository's
+# .pre-commit-config.yaml lists under 'ci.skip' — the hooks
+# pre-commit.ci cannot run because they need network access at scan
+# time or install environments above its size limits. When your
+# repository has no configuration, it falls back to
+# linting/.pre-commit-config.yaml in your organisation's '.github'
+# repository. When neither exists, or 'ci.skip' is empty, the run
+# skips quickly and green: this caller is safe to mandate estate-wide
+# from an organisation ruleset without blocking merges on
+# repositories that have nothing to lint.
+#
+# DEPLOYMENT NOTES:
+#   * Needs no secrets. The workflow token (read-only here) is
+#     exported to hooks that call the GitHub API, such as
+#     gha-workflow-linter; set export_github_token: false to withhold
+#     it. A pull request from a FORK never receives the token,
+#     whatever that input says, because the hooks there are defined
+#     by the head repository and could exfiltrate it.
+#   * Trigger on 'pull_request' or 'push' only. The reusable REFUSES
+#     'pull_request_target', which would run repository-defined tools
+#     against fork code under an elevated token.
+#   * The organisation fallback needs the org's '.github' repository
+#     to be public; the workflow token cannot read a private sibling
+#     repository.
+#   * If the organisation's mandatory-workflows ruleset already
+#     injects a required 'Linting 🧹' workflow into your repository,
+#     you do not need this caller at all, and adding it produces two
+#     check runs of the same name.
+# =============================================================================
+name: 'Linting 🧹'
+
+# yamllint disable-line rule:truthy
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions: {}
+
+# A literal group, NOT '${{ github.workflow }}-${{ github.ref }}':
+# github.workflow resolves to the workflow NAME, so any other
+# workflow carrying the same name would compute the same group and
+# one of the two would be cancelled. Never cancel, and queue rather
+# than replace, so a burst of events cannot leave a cancelled check
+# run beside a successful one for the same head SHA (which blocks
+# ruleset evaluation wherever the check is required).
+concurrency:
+  group: 'linting-${{ github.ref }}'
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  linting:
+    name: 'Linting'
+    permissions:
+      contents: read
+    # REPLACE the pinned SHA below with a generic-workflows release SHA.
+    # The all-zero SHA is a non-functional placeholder, NOT a real commit.
+    # yamllint disable-line rule:line-length
+    uses: lfreleng-actions/generic-workflows/.github/workflows/linting.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
+    # All inputs are optional and default to the estate-wide policy:
+    # run the ci.skip hooks, one parallel job each. Uncomment only
+    # what you need; stripping the '# ' prefix leaves valid YAML at
+    # the right indent.
+    # with:
+    #   # Run a named subset of the primary configuration instead:
+    #   hooks: 'mypy gitlint'
+    #   # Or lint against an alternate/remote configuration:
+    #   config_path: '.github/supplemental-linting.yaml'
+    #   config_url: ''             # https:// only
+    #   config_sha256: ''          # pin remote content (recommended)
+    #   # Several independent tasks, fanned out in parallel.
+    #   # Mutually exclusive with the scalar selectors above.
+    #   plan: |
+    #     [
+    #       {"name": "ci-skip-defaults", "ci_skipped": true},
+    #       {"name": "heavy", "hooks": "mypy"},
+    #       {"name": "supplemental",
+    #        "config_path": ".github/supplemental-linting.yaml"}
+    #     ]
+    #   path_prefix: '.'
+    #   org_fallback: true
+    #   org_config_path: 'linting/.pre-commit-config.yaml'
+    #   split_hooks: true          # one parallel job per hook
+    #   fail_fast: false
+    #   branch_name: ''            # for no-commit-to-branch hooks
+    #   export_github_token: true
+    #   prek_version: '0.4.14'
+    #   runs_on: 'ubuntu-slim'     # Linux only
+    #   timeout_minutes: 15
+    #   harden_runner_egress: 'audit'
