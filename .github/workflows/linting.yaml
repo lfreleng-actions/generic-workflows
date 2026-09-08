@@ -1,0 +1,2699 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Reusable standalone linting workflow.
+#
+#   linting  (plan -> lint matrix)
+#
+# Runs pre-commit hooks with prek, standalone from pre-commit.ci.
+# It serves two populations: repositories with no pre-commit.ci at
+# all (every Gerrit-mirrored project among them), and repositories
+# that have it but need hooks it cannot run -- hooks needing network
+# access at scan time, or whose environments exceed its size limits.
+#
+# Default behaviour (no inputs):
+#   1. Read <path_prefix>/.pre-commit-config.yaml from the repository;
+#      when the repository has none, fall back to
+#      <org_config_path> in the organisation's '.github' repository.
+#   2. Run EVERY hook in that configuration, in one job.
+#   3. When no configuration exists anywhere, the workflow reports
+#      'nothing to lint' and ends green without provisioning a runner.
+#
+# Narrow that with 'hooks' (an explicit set) or 'ci_skipped' (the
+# hooks listed under 'ci.skip', which pre-commit.ci is told not to
+# run and which therefore nothing else covers). Use 'skip_hooks' to
+# express the inverse: everything except the ids named.
+#
+# The default runs everything on purpose. A repository without
+# pre-commit.ci has no meaningful 'ci.skip', so defaulting to that
+# set would resolve no tasks and report a green check having linted
+# nothing -- silent, and on a mandated check nobody investigates it.
+# Defaulting to the whole configuration makes the misconfiguration
+# duplicated work instead: visible, and never unsafe.
+#
+# Safe to mandate estate-wide from an organisation ruleset:
+# repositories with no configuration skip quickly and never block a
+# pull request.
+#
+# Other modes (see docs/linting.md for the full reference):
+#   * hooks: run an explicit subset of hooks from the configuration
+#   * ci_skipped: run the hooks listed under 'ci.skip'
+#   * config_path / config_url: lint against an alternate or remote
+#     configuration file
+#   * plan: a JSON array of tasks, each with its own configuration
+#     source and hook subset, fanned out as parallel matrix jobs
+#
+# Security posture:
+#   * No secrets consumed; the workflow refuses pull_request_target.
+#   * All variable data reaches 'run' blocks through 'env', never
+#     through expression interpolation.
+#   * Local paths are confined to the repository workspace; '..',
+#     absolute paths and symlink escapes are rejected.
+#   * Remote configurations must be HTTPS; the plan job downloads and
+#     hashes them, and every lint job verifies the same digest, so
+#     the content cannot change between planning and linting.
+#   * The organisation fallback pins the configuration by git blob
+#     SHA and verifies its digest after the fetch.
+#
+# Caller requirements:
+#   * Trigger on 'pull_request', 'push', 'schedule' or
+#     'workflow_dispatch' (NOT 'pull_request_target').
+#   * Grant the calling job 'contents: read'.
+#
+# Call this from a thin caller workflow; see examples/linting/ and
+# docs/linting.md.
+name: '[R] Linting 🧹'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_call:
+    inputs:
+      # --- Lint task selection ---
+      plan:
+        description: >-
+          JSON array of lint tasks, each an object with 'name' and an
+          optional 'config_path' or 'config_url', 'config_sha256',
+          'hooks' or 'ci_skipped'. Mutually exclusive with the scalar
+          selection inputs below; supplying both fails rather than
+          discarding one in silence.
+        required: false
+        type: string
+        default: ''
+      hooks:
+        description: >-
+          Space or comma separated hook ids to run from the
+          configuration. Empty runs every hook in it; set ci_skipped
+          to run the 'ci.skip' set instead.
+        required: false
+        type: string
+        default: ''
+      ci_skipped:
+        description: >-
+          Run the hook ids listed under 'ci.skip' in the
+          configuration -- the hooks pre-commit.ci is told to skip,
+          which are therefore the ones nothing else runs. Use this
+          where pre-commit.ci already covers the rest, to avoid
+          linting the same code twice.
+
+          The default is the opposite, and deliberately so: a
+          repository without pre-commit.ci (every Gerrit-mirrored
+          project, for one) has no meaningful 'ci.skip', so defaulting
+          to it would resolve no tasks and report a green check having
+          linted nothing. Defaulting to the whole configuration makes
+          the misconfiguration duplicated work rather than silent
+          absence of work.
+
+          Mutually exclusive with 'hooks'.
+        required: false
+        type: boolean
+        default: false
+      skip_hooks:
+        description: >-
+          Space or comma separated hook ids to EXCLUDE from whichever
+          set runs. The inverse of 'hooks', which names a subset to
+          include and so cannot express an exclusion, and the
+          equivalent of the legacy compose-repo-linting workflow's
+          'pre_commit_skips'.
+
+          Applies to EVERY task, plan entries included, so it reads as
+          a policy for the run rather than a property of one
+          selection. It combines with every other mode rather than
+          conflicting with them.
+
+          The executor applies it, not this workflow, so prek's
+          matching has one implementation rather than two. That
+          includes a hook's 'alias', which prek's '--skip' accepts as
+          readily as an id, so an exclusion naming an alias behaves
+          the same in every mode. A task whose every hook is excluded
+          resolves to a job that reports nothing to do.
+        required: false
+        type: string
+        default: ''
+      config_path:
+        description: >-
+          Repository-relative path to an alternate pre-commit
+          configuration file. Empty uses
+          <path_prefix>/.pre-commit-config.yaml.
+        required: false
+        type: string
+        default: ''
+      config_url:
+        description: >-
+          HTTPS download URL for the pre-commit configuration file.
+          Mutually exclusive with config_path.
+        required: false
+        type: string
+        default: ''
+      config_sha256:
+        description: >-
+          Expected SHA-256 checksum of the file fetched from
+          config_url. When empty, the digest computed by the plan job
+          pins the content for the lint jobs instead.
+        required: false
+        type: string
+        default: ''
+      path_prefix:
+        description: >-
+          Directory holding the project code, and with it the
+          '.pre-commit-config.yaml' this workflow reads. Naming a
+          directory asserts a configuration is in it, so finding
+          none there FAILS the run rather than falling back to the
+          organisation default or reporting no work. The default '.'
+          carries no such assertion: a repository root with no
+          configuration is the ordinary case and skips cleanly.
+
+          This value is also the working directory each lint task
+          runs in. When config_path or config_url replaces the
+          primary configuration, the plan job does not inspect the
+          prefix, so a bad one surfaces in the lint jobs instead of
+          at plan time. Loudly, never green -- see docs/linting.md.
+        required: false
+        type: string
+        default: '.'
+
+      # --- Organisation fallback ---
+      org_fallback:
+        description: >-
+          When the repository has no pre-commit configuration, fall
+          back to org_config_path in the organisation's '.github'
+          repository. Requires that repository to be public (the
+          workflow token cannot read a private sibling repository).
+        required: false
+        type: boolean
+        default: true
+      org_config_path:
+        description: >-
+          Path of the fallback configuration file inside the
+          organisation's '.github' repository.
+        required: false
+        type: string
+        default: 'linting/.pre-commit-config.yaml'
+
+      # --- Execution shape ---
+      split_hooks:
+        description: >-
+          Run each SELECTED hook in its own parallel matrix job.
+          'false' runs them sequentially in a single job. This
+          governs how a selection is divided, so it does not apply
+          to a task that runs the whole configuration (an entry with
+          neither 'hooks' nor 'ci_skipped', or a bare config_path /
+          config_url input): that task stays one job, because prek
+          runs a whole configuration in its declared order and
+          fanning it out would repeat every environment build.
+        required: false
+        type: boolean
+        default: true
+      fail_fast:
+        description: 'Cancel remaining lint jobs when one fails'
+        required: false
+        type: boolean
+        default: false
+      branch_name:
+        description: >-
+          Checkout this new branch before linting; works around hooks
+          such as no-commit-to-branch that reject protected branches.
+          Restricted to [A-Za-z0-9._/-] with no component starting
+          '-', which is narrower than git's own ref rules: the value
+          reaches command lines here and in the executor, and both
+          hold it to the same contract. Pick a conforming name for
+          this throwaway branch rather than reusing an existing one.
+        required: false
+        type: string
+        default: ''
+      export_github_token:
+        description: >-
+          Export the workflow token as GITHUB_TOKEN/GH_TOKEN to the
+          hook environment, for linters that call the GitHub API
+          (e.g. gha-workflow-linter). The token carries only the
+          calling job's (read-only) permissions.
+
+          Honoured for TRUSTED events alone: push, schedule,
+          workflow_dispatch, and a pull request whose head is this
+          same repository. Every other event withholds the token,
+          whatever this is set to, because the checkout may carry
+          hooks from outside the base repository (merge_group,
+          pull_request_review and so on) and a token reaching them
+          could be exfiltrated.
+        required: false
+        type: boolean
+        default: true
+      prek_version:
+        description: 'Version of prek used to run the hooks (X.Y.Z)'
+        required: false
+        type: string
+        default: '0.4.14'
+
+      # --- Runner selection and timeout ---
+      runs_on:
+        description: >-
+          Runner label for all jobs. Must name a LINUX runner that
+          harden-runner can monitor, which rules out 'ubuntu-slim',
+          container jobs, community-tier ARM64 images and bare
+          self-hosted runners; the jobs verify this at runtime rather
+          than trusting the label. 'ubuntu-latest' and the pinned
+          'ubuntu-24.04'/'ubuntu-22.04' images all qualify, as do
+          larger x64 runners for a hook that needs the headroom.
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+      timeout_minutes:
+        description: 'Timeout (minutes) for each lint job'
+        required: false
+        type: number
+        default: 15
+
+      # --- Runner hardening ---
+      harden_runner_egress:
+        description: >-
+          Harden-runner egress policy: 'audit' or 'block'. Defaults
+          to 'audit' because hook environments legitimately download
+          from hook-specific hosts the allow-list below cannot
+          predict. Callers with a known hook set should pass 'block'
+          and extend harden_runner_allowed_endpoints.
+        required: false
+        type: string
+        default: 'audit'
+      harden_runner_allowed_endpoints:
+        description: >-
+          Newline-separated host:port allow-list applied when
+          harden_runner_egress is 'block'. The default covers GitHub,
+          PyPI/uv and the Node.js toolchain hosts prek uses, plus the
+          Actions cache service the pinned executor restores from -- a
+          dependency internal to this workflow, which a caller cannot
+          reasonably be expected to discover.
+        required: false
+        type: string
+        default: |
+          api.github.com:443
+          codeload.github.com:443
+          github.com:443
+          objects.githubusercontent.com:443
+          raw.githubusercontent.com:443
+          release-assets.githubusercontent.com:443
+          astral.sh:443
+          pypi.org:443
+          files.pythonhosted.org:443
+          registry.npmjs.org:443
+          nodejs.org:443
+          *.actions.githubusercontent.com:443
+          *.blob.core.windows.net:443
+
+    outputs:
+      # 'true'/'false' from a fixed vocabulary; safe to use in a
+      # caller's run: block without laundering.
+      has_work:
+        description: >-
+          'true' when the plan resolved at least one lint task.
+        value: ${{ jobs.plan.outputs.has_work }}
+      matrix:
+        description: >-
+          The resolved lint plan as a JSON object with an 'include'
+          array; empty when the workflow skipped.
+        value: ${{ jobs.plan.outputs.matrix }}
+
+permissions: {}
+
+# No concurrency block, deliberately: concurrency belongs to the
+# caller. See examples/linting/github.yaml for the recommended group,
+# 'cancel-in-progress: false' and 'queue: max' settings that avoid
+# leaving cancelled check runs beside successful ones.
+
+jobs:
+  plan:
+    name: 'Lint plan'
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      # 'resolve' only runs past the fast-abort gate; when it skips,
+      # its outputs are empty strings and 'locate' supplies the
+      # verdict (a non-empty string, so the || picks the right one).
+      has_work: >-
+        ${{ steps.resolve.outputs.has_work
+          || steps.locate.outputs.has_work }}
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920  # v2.20.0
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ (inputs.harden_runner_egress == 'block') && 'block' || 'audit' }}
+          allowed-endpoints: >
+            ${{ inputs.harden_runner_allowed_endpoints }}
+
+      - name: 'Guard trigger and validate inputs'
+        env:
+          INPUT_PLAN: ${{ inputs.plan }}
+          INPUT_HOOKS: ${{ inputs.hooks }}
+          INPUT_CI_SKIPPED: ${{ inputs.ci_skipped }}
+          INPUT_SKIP_HOOKS: ${{ inputs.skip_hooks }}
+          INPUT_CONFIG_PATH: ${{ inputs.config_path }}
+          INPUT_CONFIG_URL: ${{ inputs.config_url }}
+          INPUT_CONFIG_SHA256: ${{ inputs.config_sha256 }}
+          INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
+          INPUT_ORG_CONFIG_PATH: ${{ inputs.org_config_path }}
+          INPUT_BRANCH_NAME: ${{ inputs.branch_name }}
+          INPUT_PREK_VERSION: ${{ inputs.prek_version }}
+          INPUT_HARDEN_RUNNER_EGRESS: ${{ inputs.harden_runner_egress }}
+        run: |
+          # Guard trigger and validate inputs
+          set -euo pipefail
+          errors=0
+          err() {
+            # Prints "$1" ALONE. Callers must pass a single argument;
+            # a second fragment is discarded, which has already cost
+            # one error message its remediation text.
+            echo "::error::$1 ❌"
+            errors=1
+          }
+
+          # BEGIN harden_check (extracted by tests/test-locate-rules.sh)
+          # Decide whether harden-runner is really monitoring this
+          # job.
+          #
+          # The action returns early -- printing to stdout, neither
+          # warning nor failing -- on 'ubuntu-slim', inside a
+          # container, on community-tier ARM64, on a self-hosted
+          # runner with no agent, and when the repository carries the
+          # 'skip-harden-runner' custom property. RUNNER_OS reads
+          # 'Linux' through every one of them, so a platform test
+          # alone reports a hardened job that is nothing of the sort.
+          #
+          # Test for the AGENT instead of enumerating runner shapes.
+          # Enumerating unsupported labels is a blocklist, and a
+          # runner image added next year walks straight past it; the
+          # agent either started or it did not. On Linux the pre-step
+          # blocks until the agent writes its status file, so by the
+          # time a later step runs the file is there or the agent
+          # never came up. A custom VM image ships the agent already
+          # running and announces itself by environment variable.
+          #
+          # The status file is evidence ONLY on an ephemeral runner.
+          # '/home/agent/agent.status' is precisely what
+          # harden-runner's own isAgentInstalled() tests, and its
+          # self-hosted post-step does not remove it, so on a
+          # persistent runner a file left by an earlier job would
+          # read as 'monitored' with nothing running. Worse,
+          # shouldDeployAgentOnSelfHosted() returns FALSE once it
+          # sees that file, so harden-runner itself then declines to
+          # install -- the stale file both causes the gap and hides
+          # it.
+          #
+          # A GitHub-hosted runner is discarded after the job, so the
+          # file can only be there because this job's pre-step wrote
+          # it. RUNNER_ENVIRONMENT is the same signal harden-runner
+          # branches on (isGithubHosted), so the two agree by
+          # construction rather than by coincidence.
+          #
+          # Anything else reports 'unmonitored', which is the honest
+          # answer regardless: in the community tier harden-runner
+          # installs no agent on a self-hosted runner unless
+          # deploy-on-self-hosted-vm is set, so there was no
+          # enforcement to lose. 'audit' warns and continues;
+          # 'block' stops.
+          harden_runner_verdict() {
+            # $1=RUNNER_OS $2=agent status file $3=custom-image flag
+            # $4=RUNNER_ENVIRONMENT
+            if [ "$1" != 'Linux' ]; then
+              printf 'not-linux'
+              return
+            fi
+            if [ "$4" != 'github-hosted' ]; then
+              printf 'unmonitored'
+              return
+            fi
+            if [ "$3" = 'true' ] || [ -f "$2" ]; then
+              printf 'monitored'
+              return
+            fi
+            printf 'unmonitored'
+          }
+
+          # Act on the verdict. 'not-linux' is a caller mistake and
+          # deterministic, so it fails whatever the policy.
+          #
+          # 'unmonitored' splits on the policy the caller asked for,
+          # because the loss differs. Under 'block' the caller asked
+          # for egress enforcement and is not getting it: hooks the
+          # repository controls would reach the network unchecked
+          # while the check still went green, so stop. Under 'audit'
+          # nothing was ever enforced -- audit records traffic and
+          # blocks none of it -- so the loss is telemetry, and
+          # failing every pull request across the estate over a
+          # vendor outage would cost far more than it saved.
+          harden_runner_gate() {
+            # $1=verdict $2=egress policy
+            case "$1" in
+              not-linux)
+                echo "::error::runs_on must name a Linux runner:" \
+                  "this workflow and harden-runner both require" \
+                  "one (RUNNER_OS=$RUNNER_OS) ❌"
+                return 1
+                ;;
+              unmonitored)
+                if [ "$2" = 'block' ]; then
+                  echo "::error::harden-runner is not monitoring" \
+                    "this runner, so the 'block' egress policy is" \
+                    "not in force ❌"
+                  echo "::error::Repository-defined hooks would" \
+                    "reach the network unchecked while this check" \
+                    "reported green. Use a runner harden-runner" \
+                    "supports (a GitHub-hosted x64 Linux image," \
+                    "not 'ubuntu-slim', not a container job), or" \
+                    "set harden_runner_egress to 'audit'."
+                  return 1
+                fi
+                echo "::warning::harden-runner is not monitoring" \
+                  "this runner; egress is unrecorded. Audit mode" \
+                  "enforces nothing either way, so the run" \
+                  "continues."
+                ;;
+            esac
+            return 0
+          }
+          # END harden_check
+
+          if ! harden_runner_gate \
+            "$(harden_runner_verdict "$RUNNER_OS" \
+              /home/agent/agent.status \
+              "${STEP_SECURITY_HARDEN_RUNNER:-}" \
+              "${RUNNER_ENVIRONMENT:-}")" \
+            "$INPUT_HARDEN_RUNNER_EGRESS"; then
+            exit 1
+          fi
+
+          # This workflow runs repository-defined tools against
+          # repository content. Under pull_request_target both come
+          # from a fork while the token belongs to the base
+          # repository, which is exactly the confusion an attacker
+          # needs. Refuse the trigger outright.
+          if [ "$GITHUB_EVENT_NAME" = 'pull_request_target' ]; then
+            echo "::error::linting must not run on" \
+              "pull_request_target; use pull_request, push," \
+              "schedule or workflow_dispatch"
+            exit 1
+          fi
+
+          check_path() {
+            # $1=value $2=label
+            # A bash pattern match, not grep: 'grep -qE ^...$'
+            # anchors per LINE, so a multi-line value whose lines
+            # each match would slip through, and a path carrying a
+            # newline corrupts the single-line GITHUB_OUTPUT records
+            # written below.
+            if [[ "$1" == *[$'\n\r\t\v\f']* ]]; then
+              err "$2 must not contain control characters"
+              return
+            fi
+            if ! printf '%s' "$1" |
+              grep -qE '^[A-Za-z0-9._/-]+$'; then
+              err "$2 contains unsupported characters"
+              return
+            fi
+            # Must not START with '-', on any component. Such a path
+            # reaches command lines below, where it reads as a bundle
+            # of options: 'grep -qi skip -foo/...' fails, and the
+            # negated test that consumes it then reports 'nothing to
+            # lint'. Commands here also pass '--', so this is the
+            # first of two locks.
+            case "$1" in
+              -*) err "$2 must not start with '-'" ;;
+            esac
+            case "$1" in
+              */-*) err "$2 path components must not start with '-'" ;;
+            esac
+            case "$1" in
+              /*) err "$2 must be a relative path" ;;
+            esac
+            case "/$1/" in
+              */../*) err "$2 must not contain '..'" ;;
+            esac
+          }
+
+          # BEGIN plan_conflicts (extracted by tests/test-locate-rules.sh)
+          # Echo the scalar selectors supplied alongside a plan, or
+          # nothing when the combination is legal.
+          #
+          # 'plan' and the scalars are mutually exclusive. Discarding
+          # a value a caller supplied would look identical to running
+          # it, which is the failure this workflow exists to avoid.
+          plan_conflicts() {
+            # $1=plan $2=hooks $3=config_path $4=config_url $5=sha
+            # $6=ci_skipped
+            local out=''
+            [ -z "$1" ] && { printf ''; return 0; }
+            [ -n "$2" ] && out="$out hooks"
+            [ -n "$3" ] && out="$out config_path"
+            [ -n "$4" ] && out="$out config_url"
+            [ -n "$5" ] && out="$out config_sha256"
+            # The boolean's own default is 'false', so only an
+            # explicit 'true' counts as supplied -- a caller who
+            # never mentioned it must not trip the conflict.
+            [ "$6" = 'true' ] && out="$out ci_skipped"
+            printf '%s' "$out"
+            return 0
+          }
+          # END plan_conflicts
+
+          conflicting=$(plan_conflicts "$INPUT_PLAN" "$INPUT_HOOKS" \
+            "$INPUT_CONFIG_PATH" "$INPUT_CONFIG_URL" \
+            "$INPUT_CONFIG_SHA256" "$INPUT_CI_SKIPPED")
+          if [ -n "$conflicting" ]; then
+            # One argument: err() prints "$1" alone, so a second
+            # fragment would vanish and take the remediation with it.
+            hint='(move each into a plan entry)'
+            err "plan cannot combine with:$conflicting $hint"
+          fi
+
+          # Same rule the plan entries follow: one selector, not two.
+          # Accepting both would discard one, and a 'hooks' list that
+          # never ran looks identical to one that did.
+          if [ "$INPUT_CI_SKIPPED" = 'true' ] &&
+            [ -n "$INPUT_HOOKS" ]; then
+            err 'hooks and ci_skipped are mutually exclusive'
+          fi
+
+          check_path "$INPUT_PATH_PREFIX" 'path_prefix'
+          if [ -n "$INPUT_CONFIG_PATH" ]; then
+            check_path "$INPUT_CONFIG_PATH" 'config_path'
+          fi
+          check_path "$INPUT_ORG_CONFIG_PATH" 'org_config_path'
+          if [ -n "$INPUT_BRANCH_NAME" ]; then
+            check_path "$INPUT_BRANCH_NAME" 'branch_name'
+          fi
+          if [ -n "$INPUT_HOOKS" ]; then
+            if [[ "$INPUT_HOOKS" == *[$'\n\r\t\v\f']* ]]; then
+              err 'hooks must not contain control characters'
+            else
+              # Each id must start alphanumeric; see the note beside
+              # ID_RE in the resolver for why a leading '-' matters.
+              #
+              # 'read -ra' splits on IFS WITHOUT pathname expansion.
+              # An unquoted expansion would glob first, so 'hooks: *'
+              # would validate the checked-out file names rather than
+              # the literal '*' that reaches the executor.
+              read -ra hook_ids <<< "${INPUT_HOOKS//,/ }"
+              for hook_id in "${hook_ids[@]}"; do
+                if ! printf '%s' "$hook_id" |
+                  grep -qE '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
+                  err "invalid hook id: $hook_id"
+                fi
+              done
+            fi
+          fi
+          # skip_hooks reaches the same command line, so it is held to
+          # the same contract. The executor terminates option parsing
+          # with '--' for a hook id, but '--skip' takes its value as a
+          # separate argument, so validation is the only lock there.
+          if [ -n "$INPUT_SKIP_HOOKS" ]; then
+            if [[ "$INPUT_SKIP_HOOKS" == *[$'\n\r\t\v\f']* ]]; then
+              err 'skip_hooks must not contain control characters'
+            else
+              read -ra skip_ids <<< "${INPUT_SKIP_HOOKS//,/ }"
+              for skip_id in "${skip_ids[@]}"; do
+                if ! printf '%s' "$skip_id" |
+                  grep -qE '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
+                  err "invalid hook id in skip_hooks: $skip_id"
+                fi
+              done
+            fi
+          fi
+          if [ -n "$INPUT_CONFIG_URL" ]; then
+            if [ -n "$INPUT_CONFIG_PATH" ]; then
+              err 'config_path and config_url are mutually exclusive'
+            fi
+            if ! printf '%s' "$INPUT_CONFIG_URL" |
+              grep -qE \
+              '^https://[A-Za-z0-9._~:/?#@$&()*+,;=%-]+$'; then
+              err 'config_url must be a plain https:// URL'
+            fi
+          fi
+          if [ -n "$INPUT_CONFIG_SHA256" ]; then
+            if ! printf '%s' "$INPUT_CONFIG_SHA256" |
+              grep -qE '^[0-9a-fA-F]{64}$'; then
+              err 'config_sha256 must be a 64-character hex digest'
+            fi
+            # Only a config_url task carries a digest forward, so a
+            # checksum without one gets discarded. Refuse it rather
+            # than let a caller believe a local or organisation
+            # configuration was integrity-pinned when it was not.
+            if [ -z "$INPUT_CONFIG_URL" ]; then
+              err 'config_sha256 requires config_url'
+            fi
+          fi
+          # Validated here rather than trusted in the expression that
+          # selects the policy. That expression has to fall back to
+          # something, and 'audit' is this workflow's documented
+          # default, so a typo such as 'blok' would quietly weaken a
+          # caller who asked to block. Nothing but the harden-runner
+          # step itself runs before this check, so failing here still
+          # precedes every hook.
+          case "$INPUT_HARDEN_RUNNER_EGRESS" in
+            audit|block) ;;
+            *)
+              err "harden_runner_egress must be 'audit' or 'block'"
+              ;;
+          esac
+          # Held to the control-character check FIRST, as the path
+          # and hook inputs are. 'grep -qE ^...$' anchors per LINE,
+          # so a value spelling '0.4.14<newline>junk' matches on its
+          # first line and passes, then travels on to the executor
+          # and its cache key carrying the remainder.
+          if [[ "$INPUT_PREK_VERSION" == *[$'\n\r\t\v\f']* ]]; then
+            err 'prek_version must not contain control characters'
+          elif ! printf '%s' "$INPUT_PREK_VERSION" |
+            grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            err 'prek_version must be a bare X.Y.Z version'
+          fi
+          if [ "${#INPUT_PLAN}" -gt 65536 ]; then
+            err 'plan exceeds 64 KiB'
+          fi
+
+          [ "$errors" -eq 0 ] || exit 1
+
+      - name: 'Compute sparse-checkout patterns'
+        id: sparse
+        env:
+          INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
+          INPUT_CONFIG_PATH: ${{ inputs.config_path }}
+        run: |
+          # Compute sparse-checkout patterns
+          set -euo pipefail
+          pp="${INPUT_PATH_PREFIX#./}"
+          if [ "$pp" = '.' ]; then pp=''; fi
+          # Normalise separators before joining. check_path permits
+          # 'src/', 'src//nested' and './src', and the non-cone
+          # matcher uses gitignore semantics, where a doubled slash
+          # matches nothing -- so an unnormalised prefix builds a
+          # pattern that checks nothing out and the run reports
+          # 'nothing to lint'. Collapse runs of '/', then strip any
+          # trailing one.
+          while [ "$pp" != "${pp//\/\//\/}" ]; do pp="${pp//\/\//\/}"; done
+          while [ "$pp" != "${pp%/}" ]; do pp="${pp%/}"; done
+          # An unpredictable delimiter, not a fixed word. 'PATTERNS_EOF'
+          # is itself a legal config_path, and supplying it would close
+          # the record early and leave the real terminator to parse as
+          # a bogus workflow command.
+          delim="PATTERNS_EOF_$(dd if=/dev/urandom bs=15 count=1 \
+            status=none | base64 | tr -d '/+=')"
+          {
+            echo "patterns<<$delim"
+            echo "${pp:+$pp/}.pre-commit-config.yaml"
+            if [ -n "$INPUT_CONFIG_PATH" ]; then
+              echo "$INPUT_CONFIG_PATH"
+            fi
+            echo "$delim"
+          } >> "$GITHUB_OUTPUT"
+
+      # The plan job only reads configuration files, so a sparse
+      # checkout keeps it fast on large repositories. A JSON plan may
+      # reference arbitrary in-repository paths, so that mode gets a
+      # full checkout instead.
+      - name: 'Checkout repository (sparse)'
+        if: inputs.plan == ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: ${{ steps.sparse.outputs.patterns }}
+          sparse-checkout-cone-mode: false
+
+      - name: 'Checkout repository (full)'
+        if: inputs.plan != ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 'Locate configuration'
+        id: locate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORG: ${{ github.repository_owner }}
+          INPUT_PLAN: ${{ inputs.plan }}
+          INPUT_HOOKS: ${{ inputs.hooks }}
+          INPUT_CI_SKIPPED: ${{ inputs.ci_skipped }}
+          INPUT_SKIP_HOOKS: ${{ inputs.skip_hooks }}
+          INPUT_CONFIG_PATH: ${{ inputs.config_path }}
+          INPUT_CONFIG_URL: ${{ inputs.config_url }}
+          INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
+          INPUT_ORG_FALLBACK: ${{ inputs.org_fallback }}
+          INPUT_ORG_CONFIG_PATH: ${{ inputs.org_config_path }}
+        run: |
+          # Locate configuration; abort fast when there is no work.
+          set -euo pipefail
+
+          # BEGIN locate_rules (extracted by tests/test-locate-rules.sh)
+          # The two decisions below each turn "could not tell" into a
+          # verdict, so each is a place where a wrong answer reports a
+          # green check having linted nothing. They live in functions
+          # so the fixtures can exercise them directly.
+
+          # Echo the first path component that is a DANGLING symlink,
+          # or nothing when the path is clean.
+          #
+          # The sparse checkout materialises the configuration path
+          # alone, so an in-repository symlink anywhere along that
+          # path -- the file itself, or any DIRECTORY component of
+          # path_prefix -- resolves to nothing. '[ -f ]' then reports
+          # false and the run would fall through to the organisation
+          # fallback or to 'no work'.
+          #
+          # Every component gets walked, because a dangling parent
+          # leaves the candidate merely absent rather than '-L'.
+          dangling_component() {
+            local path="$1" probe='' part
+            # shellcheck disable=SC2001
+            for part in $(echo "$path" | sed 's|/| |g'); do
+              probe="${probe:+$probe/}$part"
+              if [ -L "$probe" ] && [ ! -e "$probe" ]; then
+                printf '%s' "$probe"
+                return 0
+              fi
+            done
+            return 0
+          }
+
+          # Map an HTTP status from the organisation fallback lookup
+          # onto 'present', 'absent' or 'error'.
+          #
+          # ONLY 404 means absent. Everything else -- 401, 403, 429,
+          # 5xx, and curl's own '000' for DNS or TLS failure -- is a
+          # failure to find out, and must not masquerade as 'nothing
+          # to lint' on a check the organisation mandates.
+          #
+          # 404 alone is not proof either, which is why the caller
+          # confirms the repository is readable before believing it.
+          # GitHub answers 404 rather than 403 for anything the token
+          # cannot see, so a PRIVATE '.github' repository is
+          # indistinguishable from an absent file by this status.
+          org_status_verdict() {
+            case "$1" in
+              200) printf 'present' ;;
+              404) printf 'absent' ;;
+              *) printf 'error' ;;
+            esac
+          }
+
+          # Decide what a 404 on the fallback FILE means, given what
+          # the REPOSITORY lookup answered.
+          #
+          # A readable repository makes the file's absence a fact:
+          # the token can see the repository and the file is not in
+          # it. Anything else leaves two readings this token cannot
+          # separate -- no '.github' repository at all, or one it may
+          # not read -- and picking the flattering one reports a
+          # green check having linted nothing.
+          org_absence_verdict() {
+            case "$1" in
+              200) printf 'absent' ;;
+              *) printf 'error' ;;
+            esac
+          }
+
+          # True when an absolute path is the workspace or lies
+          # inside it. Equality counts: a symlink targeting '.'
+          # resolves to the workspace root itself, which is contained
+          # by any reasonable reading and which the executor accepts.
+          contained_in_workspace() {
+            # $1=absolute path $2=workspace
+            case "$1" in
+              "$2"|"$2"/*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          # True when an explicitly named path_prefix yielded no
+          # configuration.
+          #
+          # This ONE rule replaces the prefix classification that
+          # used to sit here: a git-versus-filesystem arbitration
+          # trying to separate 'the prefix is bogus' from 'the prefix
+          # is fine but holds no configuration'. That distinction was
+          # corrected nine times over this pull request without
+          # settling, because every instrument is authoritative for
+          # one case and blind in another -- the filesystem cannot
+          # see a valid prefix the sparse checkout never
+          # materialised, and git cannot see through a symlink.
+          #
+          # The distinction does not need making. A caller who names
+          # a directory has asserted a configuration is in it, so an
+          # absence is a caller error whatever the cause: a typo, a
+          # file-valued prefix, a symlink the sparse checkout cannot
+          # follow, an untracked path, a renamed directory, or a
+          # configuration moved out from under a prefix that is still
+          # perfectly valid.
+          #
+          # That last case is the one the classification let THROUGH,
+          # having rejected the implausible ones: a real directory
+          # holding no configuration fell to the organisation
+          # fallback and linted against a configuration the caller
+          # never named, reporting success.
+          #
+          # An empty prefix is exempt, and must be. That is the
+          # estate-wide default, where 'this repository has no
+          # configuration' is the ordinary answer and has to stay
+          # green.
+          explicit_prefix_empty() {
+            # $1=normalised prefix $2=resolved primary configuration
+            [ -n "$1" ] && [ -z "$2" ]
+          }
+
+          # Reduce a value to ONE line of printable text.
+          #
+          # primary_error travels to the resolver as a single-line
+          # GITHUB_OUTPUT record, and one of its inputs is
+          # 'readlink' output -- the contents of a committed symlink,
+          # which a fork pull request controls and which may hold
+          # newlines. A target spelling
+          # 'x\nproceed=false\nhas_work=false\ndummy=' would append
+          # its own records, skip the resolver and finish green
+          # without running the plan.
+          #
+          # Strip the control characters rather than quote them: the
+          # value is a human-readable diagnosis, so losing exotic
+          # bytes costs nothing, while a quoting scheme would have to
+          # be undone correctly at the far end.
+          single_line() {
+            printf '%s' "$1" | tr -d '\000-\037' | cut -c1-200
+          }
+
+          # Decide whether tooling has to install to answer whether
+          # this configuration carries a 'ci.skip' key. Echoes
+          # 'abort', 'parse' or 'unreadable'.
+          #
+          # Match the bare word, NOT a key-shaped regex. YAML admits
+          # 'skip:', 'skip :' and the flow form '{"skip": [...]}',
+          # and a pattern tight enough to match keys alone missed
+          # three of those four, reporting green having run nothing.
+          #
+          # A substring test still cannot PROVE a key absent, so
+          # 'abort' is reserved for the one case where absence is
+          # provable: printable ASCII with no backslash. No YAML
+          # escape exists without a backslash, so '"\x73kip"' --
+          # which PyYAML decodes as 'skip' -- cannot hide there, and
+          # no alternate encoding such as UTF-16 can hide the letters
+          # either. On a fork pull request this file is
+          # attacker-controlled, so that residue was a way to pass a
+          # mandated check having linted nothing.
+          #
+          # A blunt 'any backslash' rather than the tighter '\x',
+          # '\u', '\U' -- the only YAML escapes that can spell a
+          # letter. That enumeration is sound, but enumerations here
+          # have been wrong before, and the cost is small: this
+          # shortcut saves an install in ONE job and does not decide
+          # the matrix.
+          #
+          # grep exits 1 for 'no match' and 2 for 'could not read',
+          # and folding the second into the first would report
+          # 'nothing to lint' for a file it failed to open.
+          skip_prefilter() {
+            # $1=configuration file
+            local status=0 backslash
+            grep -qi 'skip' -- "$1" || status=$?
+            if [ "$status" -gt 1 ]; then
+              printf 'unreadable'
+              return
+            fi
+            if [ "$status" -eq 0 ]; then
+              printf 'parse'
+              return
+            fi
+            # Octal 134 is a backslash. Written as a single-quoted
+            # literal the linter reads it as a botched quote escape
+            # (SC1003). (Do not start this line with the linter's
+            # name -- that parses as a directive.)
+            backslash=$(printf '\134')
+            if LC_ALL=C grep -qaF -- "$backslash" "$1"; then
+              printf 'parse'
+              return
+            fi
+            if LC_ALL=C grep -qa '[^[:print:][:space:]]' -- "$1"
+            then
+              printf 'parse'
+              return
+            fi
+            printf 'abort'
+          }
+          # END locate_rules
+
+          proceed='true'
+          has_work='true'
+          primary=''
+          org_json=''
+          primary_error=''
+
+          # Report a problem with the PRIMARY configuration, fatally
+          # or not depending on whether anything will read it.
+          #
+          # In plan mode every entry may name its own config_path or
+          # config_url, in which case the primary is never read and
+          # failing here would abort tasks that had no use for it.
+          # The shell cannot tell without parsing the plan JSON, so
+          # the verdict moves to the resolver, which has parsed it
+          # already and fails with this message when an entry does
+          # fall through to the primary.
+          #
+          # Same rule as the scalar path follows: inspect only what
+          # will be read. That fix was applied to config_path and
+          # config_url and never carried across to plan mode.
+          primary_problem() {
+            # $1=summary $2=remedy
+            if [ -n "$INPUT_PLAN" ]; then
+              primary_error=$(single_line "$1")
+              echo "Primary configuration unusable: $primary_error 💬"
+              echo 'Plan entries naming their own configuration' \
+                'continue; one relying on the primary fails 💬'
+              return 0
+            fi
+            echo "::error::$1 ❌"
+            echo "::error::$2"
+            exit 1
+          }
+
+          explicit='false'
+          all="$INPUT_PLAN$INPUT_HOOKS"
+          all="$all$INPUT_CONFIG_PATH$INPUT_CONFIG_URL"
+          if [ -n "$all" ]; then
+            explicit='true'
+          fi
+
+          # Decide whether the primary configuration matters BEFORE
+          # inspecting it. An explicitly named config_path/config_url
+          # replaces it outright, so neither the checks below nor the
+          # organisation fallback lookup should run: a broken default
+          # the caller never asked for must not fail a run that would
+          # never have read it.
+          #
+          # A plan cannot reach here alongside these (they are
+          # mutually exclusive, checked above), and a plan entry
+          # naming no configuration of its own still falls through to
+          # the primary -- which may be the fallback -- so plan mode
+          # keeps both.
+          needs_primary='true'
+          if [ -n "$INPUT_CONFIG_PATH" ] ||
+            [ -n "$INPUT_CONFIG_URL" ]; then
+            needs_primary='false'
+          fi
+
+          pp="${INPUT_PATH_PREFIX#./}"
+          if [ "$pp" = '.' ]; then pp=''; fi
+          # Same normalisation as the sparse-pattern step, so both
+          # build the identical candidate path.
+          while [ "$pp" != "${pp//\/\//\/}" ]; do pp="${pp//\/\//\/}"; done
+          while [ "$pp" != "${pp%/}" ]; do pp="${pp%/}"; done
+          candidate="${pp:+$pp/}.pre-commit-config.yaml"
+          if [ "$needs_primary" = 'true' ]; then
+            # Dangling symlinks first: the specific diagnosis is far
+            # more useful than the general 'nothing here' verdict
+            # that explicit_prefix_empty gives below.
+            offender=$(dangling_component "$candidate")
+            if [ -n "$offender" ]; then
+              target=$(readlink "$offender" || echo '?')
+              why="$offender is a symlink to '$target', which"
+              why="$why this job did not check out"
+              hint="Reporting 'no configuration' here would pass a"
+              hint="$hint green check without linting. Point"
+              hint="$hint config_path at the real file, or set the"
+              hint="$hint 'plan' input, which takes a full checkout."
+              primary_problem "$why" "$hint"
+            fi
+          fi
+          # A candidate that EXISTS but is not a regular file must
+          # not read as absent. '.pre-commit-config.yaml -> .' (or a
+          # directory, socket or device) resolves, so the dangling
+          # walk calls it clean, while '[ -f ]' is false -- and the
+          # run would fall through to the organisation fallback or to
+          # 'no work', reporting green with something committed at
+          # that path.
+          if [ "$needs_primary" = 'true' ] && [ -e "$candidate" ] &&
+            [ ! -f "$candidate" ]; then
+            why="$candidate exists but is not a regular file"
+            hint="Reporting 'no configuration' for it would pass a"
+            hint="$hint green check without linting."
+            primary_problem "$why" "$hint"
+          fi
+          if [ "$needs_primary" = 'true' ] && [ -f "$candidate" ]; then
+            # Contain BEFORE reading. The pre-filter below greps this
+            # file, and both '[ -f ]' and grep follow symlinks, so a
+            # committed '.pre-commit-config.yaml' symlink would
+            # otherwise read a file outside the workspace before the
+            # resolver's containment check ever runs.
+            ws=$(realpath -e -- "$GITHUB_WORKSPACE")
+            if ! abs=$(realpath -e -- "$candidate" 2>/dev/null); then
+              primary_problem "cannot resolve $candidate" \
+                'Check the path and any symlinks along it.'
+              abs=''
+            fi
+            if [ -n "$abs" ] &&
+              ! contained_in_workspace "$abs" "$ws"; then
+              # An error, not 'no configuration': treating it as
+              # absent would report a green check for a repository
+              # that pointed its configuration out of the tree.
+              hint='Point config_path at a file inside the'
+              hint="$hint repository."
+              primary_problem \
+                "$candidate resolves outside the workspace" "$hint"
+              abs=''
+            fi
+            if [ -n "$abs" ]; then
+              primary="$candidate"
+              echo "Repository configuration: $candidate 💬"
+            fi
+          fi
+
+          # An explicitly named path_prefix that produced no
+          # configuration is a caller error. See
+          # explicit_prefix_empty for why this replaces classifying
+          # the prefix, and why it must not fire on the default
+          # empty prefix.
+          #
+          # Placed BEFORE the organisation fallback on purpose: a
+          # caller who named a directory asked for the configuration
+          # in it, not for the organisation default quietly standing
+          # in for one that is missing.
+          if [ "$needs_primary" = 'true' ] &&
+            [ -z "$primary_error" ] &&
+            explicit_prefix_empty "$pp" "$primary"; then
+            why="no configuration under path_prefix:"
+            why="$why $INPUT_PATH_PREFIX"
+            hint="Expected $candidate. Reporting 'no configuration'"
+            hint="$hint would pass a green check without linting,"
+            hint="$hint and falling back to the organisation default"
+            hint="$hint would lint against a configuration you did"
+            hint="$hint not name. Check the prefix, or drop it to"
+            hint="$hint use the repository root."
+            primary_problem "$why" "$hint"
+          fi
+
+          # Fetch the organisation default configuration when the
+          # repository has none.
+          if [ -z "$primary" ] && [ -z "$primary_error" ] &&
+            [ "$needs_primary" = 'true' ] &&
+            [ "$INPUT_ORG_FALLBACK" = 'true' ]; then
+            out="$RUNNER_TEMP/org-config.json"
+            url="$GITHUB_API_URL/repos/$ORG/.github"
+            url="$url/contents/$INPUT_ORG_CONFIG_PATH"
+            # 2 MiB, not the 1 MiB configuration limit: this endpoint
+            # returns a JSON envelope with the content base64-encoded,
+            # so a 1 MiB configuration arrives as roughly 1.4 MiB and
+            # curl would abort it as HTTP 000 -- reported as 'could
+            # not read the organisation fallback' for a file well
+            # inside the documented limit, while the same bytes
+            # served over config_url were accepted.
+            #
+            # The real limit is enforced on the DECODED bytes in the
+            # resolver, where it can be compared against the same
+            # MAX_CONFIG_BYTES every other source uses.
+            code=$(curl --proto '=https' --tlsv1.2 --silent \
+              --show-error --max-redirs 3 --max-filesize 2097152 \
+              --max-time 30 --write-out '%{http_code}' \
+              --output "$out" \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              "$url") || code='000'
+            case "$(org_status_verdict "$code")" in
+              present)
+                org_json="$out"
+                echo "Organisation fallback configuration:" \
+                  "$ORG/.github $INPUT_ORG_CONFIG_PATH 💬"
+                ;;
+              absent)
+                # A 404 on the file proves nothing on its own:
+                # GitHub returns it for anything the token cannot
+                # see, so a private '.github' repository answers 404
+                # whether the file is there or not. Believing it
+                # would report 'nothing to lint' for an organisation
+                # whose fallback exists and simply could not be
+                # read -- the silent green this workflow refuses.
+                #
+                # Ask whether the REPOSITORY is readable. A 200 there
+                # means the token can see it and the file genuinely
+                # is not present:
+                #
+                #   repos/ORG/.github                      200
+                #   repos/ORG/.github/contents/<path>      404
+                #
+                # A 404 here instead leaves two cases this token
+                # cannot tell apart -- no '.github' repository at
+                # all, or one it may not read -- so the run stops and
+                # asks, rather than choosing the flattering reading.
+                repo_url="$GITHUB_API_URL/repos/$ORG/.github"
+                repo_code=$(curl --proto '=https' --tlsv1.2 \
+                  --silent --show-error --max-redirs 3 \
+                  --max-filesize 2097152 --max-time 30 \
+                  --write-out '%{http_code}' --output /dev/null \
+                  --header "Authorization: Bearer $GH_TOKEN" \
+                  --header 'Accept: application/vnd.github+json' \
+                  --header 'X-GitHub-Api-Version: 2022-11-28' \
+                  "$repo_url") || repo_code='000'
+                if [ "$(org_absence_verdict "$repo_code")" = \
+                  'absent' ]; then
+                  echo 'No organisation fallback configuration 💬'
+                else
+                  why="Could not confirm whether an organisation"
+                  why="$why fallback exists: $ORG/.github answered"
+                  why="$why HTTP $repo_code"
+                  hint="GitHub returns 404 for a repository the"
+                  hint="$hint token cannot read, so a private"
+                  hint="$hint '.github' looks the same as none at"
+                  hint="$hint all. Treating it as 'no configuration'"
+                  hint="$hint would report a green check having"
+                  hint="$hint linted nothing. Grant this workflow"
+                  hint="$hint read access to $ORG/.github, or set"
+                  hint="$hint org_fallback: false if the"
+                  hint="$hint organisation has no fallback"
+                  primary_problem "$why" "$hint"
+                fi
+                ;;
+              *)
+                why="Could not read the organisation fallback"
+                why="$why configuration (HTTP $code)"
+                hint="Treating this as 'no configuration' would"
+                hint="$hint report a green check having linted"
+                hint="$hint nothing; set org_fallback: false to opt"
+                hint="$hint out deliberately"
+                primary_problem "$why" "$hint"
+                ;;
+            esac
+          fi
+
+          if [ "$explicit" = 'false' ]; then
+            if [ -n "$primary" ]; then
+              # The pre-filter answers 'does this file mention a
+              # skip key', which decides the work in ci_skipped mode
+              # ALONE. Under the default -- run every hook in the
+              # configuration -- a file with no 'ci.skip' still has a
+              # full run's worth of work, so aborting on its absence
+              # would report green having linted nothing. That is
+              # exactly the silent-green this default exists to
+              # remove for repositories without pre-commit.ci.
+              if [ "$INPUT_CI_SKIPPED" = 'true' ]; then
+                # The decision lives in skip_prefilter (see the
+                # marked region above), so tests/test-locate-rules.sh
+                # exercises the SHIPPED rule rather than a copy. An
+                # earlier suite reimplemented the grep, and would
+                # have stayed green while the real gate regressed.
+                #
+                # '--' terminates option parsing inside the function:
+                # a path whose first character is '-' would otherwise
+                # read as options. check_path rejects such paths too;
+                # this is the second lock.
+                case "$(skip_prefilter "$primary")" in
+                  unreadable)
+                    echo "::error::could not read $primary ❌"
+                    echo "::error::Reporting 'nothing to lint' for" \
+                      "a file this job failed to open would pass a" \
+                      "green check without linting."
+                    exit 1
+                    ;;
+                  abort)
+                    proceed='false'
+                    has_work='false'
+                    ;;
+                esac
+              fi
+            elif [ -z "$org_json" ]; then
+              # No configuration anywhere. The one case that means
+              # 'nothing to lint' in every mode.
+              proceed='false'
+              has_work='false'
+            fi
+          fi
+
+          if [ "$has_work" = 'false' ]; then
+            echo '::notice::No standalone linting work detected;' \
+              'skipping ✅'
+            {
+              echo '## Linting 🧹'
+              echo ''
+              echo 'No standalone linting work detected; skipped ✅'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          {
+            echo "proceed=$proceed"
+            echo "has_work=$has_work"
+            echo "primary=$primary"
+            echo "org_json=$org_json"
+            echo "primary_error=$primary_error"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 'Set up uv'
+        if: steps.locate.outputs.proceed == 'true'
+        # yamllint disable-line rule:line-length
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          version: '0.12.4'
+
+      - name: 'Resolve lint plan'
+        id: resolve
+        if: steps.locate.outputs.proceed == 'true'
+        env:
+          INPUT_PLAN: ${{ inputs.plan }}
+          INPUT_HOOKS: ${{ inputs.hooks }}
+          INPUT_CI_SKIPPED: ${{ inputs.ci_skipped }}
+          INPUT_SKIP_HOOKS: ${{ inputs.skip_hooks }}
+          INPUT_CONFIG_PATH: ${{ inputs.config_path }}
+          INPUT_CONFIG_URL: ${{ inputs.config_url }}
+          INPUT_CONFIG_SHA256: ${{ inputs.config_sha256 }}
+          INPUT_SPLIT_HOOKS: ${{ inputs.split_hooks }}
+          INPUT_ORG_CONFIG_PATH: ${{ inputs.org_config_path }}
+          PRIMARY: ${{ steps.locate.outputs.primary }}
+          ORG_JSON: ${{ steps.locate.outputs.org_json }}
+          PRIMARY_ERROR: ${{ steps.locate.outputs.primary_error }}
+        run: |
+          # Resolve lint plan
+          set -euo pipefail
+          # '--no-config' as well as '--no-project'. '--no-project'
+          # stops uv treating the checkout as a project; it does NOT
+          # stop uv DISCOVERING configuration there. A fork-committed
+          # 'uv.toml' (or '[tool.uv]' in pyproject.toml) can redirect
+          # the index this '--with pyyaml' resolves from, so the
+          # package imported before the resolver becomes attacker
+          # code -- and '-I' cannot help, because the hostile module
+          # arrives AS PyYAML rather than beside it.
+          #
+          # Demonstrated: with a 'uv.toml' naming a bogus default
+          # index, 'uv run --no-project' tried to reach it and failed;
+          # adding '--no-config' ignored the file and installed
+          # PyYAML 6.0.2 normally.
+          #
+          # '-I' (isolated), and it is load-bearing rather than
+          # tidiness. 'python -' reads the script from stdin and puts
+          # the CURRENT DIRECTORY on sys.path -- and the current
+          # directory is the checkout, which on a fork pull request
+          # the attacker controls. A committed 'yaml.py', 'base64.py'
+          # or 'sitecustomize.py' would then be imported in place of
+          # the real module, before this resolver runs a line: it
+          # could append 'has_work=false' to GITHUB_OUTPUT and exit 0,
+          # turning a mandated check green with nothing linted, and
+          # run arbitrary code besides.
+          #
+          # Demonstrated: with a hostile 'yaml.py' in the working
+          # directory, 'python -' imported it and wrote has_work=false;
+          # 'python -I -' imported PyYAML from the uv environment and
+          # ignored the file.
+          #
+          # '-I' implies '-E' and '-s', which removes PYTHONPATH and
+          # the user site directory as well. The uv environment
+          # survives all three, because its packages are found through
+          # the interpreter's own prefix.
+          #
+          # Sparse mode is not exempt: config_path names a file that
+          # gets checked out, and 'yaml.py' is a legal value for it.
+          uv run --no-project --no-config --with pyyaml==6.0.2 \
+            python -I - <<'PYEOF'
+          # BEGIN lint_plan (extracted by tests/test-lint-plan.sh)
+          import base64
+          import hashlib
+          import json
+          import os
+          import re
+          import signal
+          import sys
+          import time
+          import urllib.parse
+          import urllib.request
+
+          import yaml
+
+          # A hook id must START with an alphanumeric. A leading '-'
+          # would reach the prek command line as an OPTION, and
+          # 'prek run --help' exits 0 — reporting a hook as passed
+          # without running it. The action terminates option parsing
+          # with '--' as well; this is the first of the two locks.
+          ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+          # Two name patterns, because caller labels and DERIVED job
+          # names have different budgets. NAME_RE bounds what a
+          # caller may write. DERIVED_NAME_RE bounds what this script
+          # builds from an already-validated label and hook id
+          # ('<name> / <hook>'), which can legitimately exceed 64
+          # without either component being invalid. Re-applying the
+          # caller limit to the derived string rejected valid input:
+          # a 65-character hook id, or a normal one appended to a
+          # long-but-legal plan name.
+          NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ /-]{0,63}$")
+          DERIVED_NAME_RE = re.compile(
+              r"^[A-Za-z0-9][A-Za-z0-9._ /-]{0,199}$"
+          )
+          URL_RE = re.compile(
+              r"^https://[A-Za-z0-9._~:/?#@$&()*+,;=%-]+$"
+          )
+          SHA_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+          class DownloadTimeout(Exception):
+              """Raised by the interval timer guarding a download."""
+
+
+          def _alarm(signum, frame):
+              raise DownloadTimeout()
+
+
+          MAX_TASKS = 50
+          MAX_CONFIG_BYTES = 1048576
+          # Matches the executor's 'curl --max-time 60', which is a
+          # TOTAL deadline. The planner must refuse what the executor
+          # cannot fetch, or a plan resolves cleanly and then fails in
+          # every lint job.
+          DOWNLOAD_TIMEOUT = 60
+          # Deliberately below DOWNLOAD_TIMEOUT: this bounds one
+          # blocking socket operation, so keeping it smaller caps how
+          # far a stalled read can overshoot the total.
+          SOCKET_TIMEOUT = 20
+          # A budget across EVERY download this plan performs, kept
+          # well inside the plan job's 10-minute limit.
+          #
+          # DOWNLOAD_TIMEOUT bounds one fetch. A plan may name up to
+          # MAX_TASKS entries, each with its own config_url, and they
+          # are fetched in sequence -- so ten slow-but-valid URLs
+          # would exceed the job limit and GitHub would CANCEL the
+          # job. A cancelled job reports no verdict at all: the
+          # caller sees the run killed rather than a message naming
+          # the URL that was too slow.
+          #
+          # Failing on a budget this side of the limit keeps the
+          # diagnosis. 300s leaves the rest of the ten minutes for
+          # checkout, uv and the parse.
+          PLAN_DOWNLOAD_BUDGET = 300
+
+
+          def fail(message):
+              print(f"::error::{message}")
+              sys.exit(1)
+
+
+          class HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
+              """Refuse a redirect before it leaves HTTPS.
+
+              urlopen follows redirects itself, so inspecting
+              response.geturl() afterwards is too late: the plaintext
+              request has already gone out, carrying whatever headers
+              it had. Rejecting in redirect_request stops the chain
+              before the next request opens.
+
+              max_redirections matches the executor's
+              'curl --max-redirs 3'. urllib defaults to 10, so a URL
+              with four to ten hops planned cleanly and then failed in
+              every lint job -- the planner must refuse what the
+              executor cannot fetch.
+              """
+
+              max_redirections = 3
+
+              def redirect_request(
+                  self, req, fp, code, msg, headers, newurl
+              ):
+                  if not newurl.lower().startswith("https://"):
+                      fail(f"refusing redirect off HTTPS: {newurl}")
+                  return super().redirect_request(
+                      req, fp, code, msg, headers, newurl
+                  )
+
+
+          OPENER = urllib.request.build_opener(HttpsOnlyRedirects)
+
+
+          def env(name, default=""):
+              return os.environ.get(name, default)
+
+
+          workspace = os.path.realpath(env("GITHUB_WORKSPACE"))
+
+
+          # Same syntax contract as the shell 'check_path' applies to
+          # the scalar inputs. A plan entry's path is repository-
+          # controlled too, and reaches the same places: a command
+          # line, GITHUB_OUTPUT, a matrix value and the Markdown step
+          # summary. Validating only the scalars left plan mode able
+          # to carry a leading hyphen, a control character, or a '|'
+          # that injects a row into the summary table.
+          PATH_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._/-]*$")
+
+
+          def contained(rel, label):
+              if not PATH_RE.fullmatch(rel):
+                  fail(f"{label} may use only [A-Za-z0-9._/-] and"
+                       f" must not start with '-': {rel!r}")
+              # No component may start with '-' either: such a path
+              # reads as options on a command line.
+              for part in rel.split("/"):
+                  if part.startswith("-"):
+                      fail(f"{label} path components must not start"
+                           f" with '-': {rel!r}")
+              if rel.startswith("/") or ".." in rel.split("/"):
+                  fail(f"{label} must be relative, without '..'")
+              resolved = os.path.realpath(
+                  os.path.join(workspace, rel)
+              )
+              inside = resolved.startswith(workspace + os.sep)
+              if not inside:
+                  fail(f"{label} escapes the workspace: {rel}")
+              if not os.path.isfile(resolved):
+                  fail(f"{label} does not exist: {rel}")
+              return resolved
+
+
+          MERGE_TAG = "tag:yaml.org,2002:merge"
+
+
+          class NoDuplicateKeys(yaml.SafeLoader):
+              """A SafeLoader that refuses a key given twice.
+
+              yaml.safe_load keeps the LAST value for a duplicate
+              mapping key and says nothing, so
+              'ci: {skip: [mypy], skip: []}' resolves to an empty
+              selection, zero tasks and a green check -- while the
+              file plainly lists a hook to run. On a fork pull
+              request this configuration is attacker-controlled, so
+              that is a way to pass a mandated check having linted
+              nothing.
+
+              The same defect as duplicate keys in the JSON plan,
+              in the other parser. Applied through the loader rather
+              than a post-parse walk, because after the mapping is
+              built the evidence is gone.
+              """
+
+              def construct_mapping(self, node, deep=False):
+                  seen = set()
+                  merges = 0
+                  for key_node, _ in node.value:
+                      # A merge key ('<<: *defaults') needs handling
+                      # apart from the rest. This scan runs BEFORE
+                      # the base constructor calls flatten_mapping,
+                      # so the node still carries the merge tag and
+                      # construct_object cannot build it -- a valid
+                      # configuration would otherwise fail with
+                      # 'could not determine a constructor'.
+                      #
+                      # ONE merge key is legal, and a later key
+                      # overriding what it brought in is the whole
+                      # point of the feature, so those collisions
+                      # stay intentional and flatten_mapping applies
+                      # them. The sequence form ('<<: [*a, *b]') is
+                      # still one key, and remains the supported way
+                      # to merge several mappings.
+                      #
+                      # A SECOND merge key is the defect. PyYAML
+                      # flattens both and lets the later win, so
+                      # '<<: *a' followed by '<<: *b' silently
+                      # replaces whatever *a contributed -- 'ci.skip'
+                      # included. That is the same discarded value
+                      # this loader exists to refuse, reached through
+                      # a key the scan below never sees.
+                      if key_node.tag == MERGE_TAG:
+                          merges += 1
+                          if merges > 1:
+                              raise yaml.constructor.ConstructorError(
+                                  "while constructing a mapping",
+                                  node.start_mark,
+                                  "found a second merge key ('<<'),"
+                                  " so one merged value would be"
+                                  " discarded; use the sequence form"
+                                  " '<<: [*a, *b]' instead",
+                                  key_node.start_mark,
+                              )
+                          continue
+                      key = self.construct_object(key_node, deep=deep)
+                      try:
+                          duplicate = key in seen
+                      except TypeError:
+                          # An unhashable key. Leave it to the base
+                          # constructor, which reports it properly.
+                          continue
+                      if duplicate:
+                          raise yaml.constructor.ConstructorError(
+                              "while constructing a mapping",
+                              node.start_mark,
+                              f"found duplicate key {key!r}, so one"
+                              " value would be discarded",
+                              key_node.start_mark,
+                          )
+                      seen.add(key)
+                  return super().construct_mapping(node, deep=deep)
+
+
+          def load_config(path, label):
+              try:
+                  with open(path, encoding="utf-8") as handle:
+                      cfg = yaml.load(handle, Loader=NoDuplicateKeys)
+              except yaml.YAMLError as exc:
+                  fail(f"invalid YAML in {label}: {exc}")
+              if not isinstance(cfg, dict):
+                  fail(f"{label} is not a YAML mapping")
+              return cfg
+
+
+          def display_config(task):
+              """The task's configuration, safe for human output.
+
+              A url task carries the URL the caller supplied, and the
+              accepted grammar admits userinfo and a query string --
+              both of which carry credentials in practice, since a
+              private configuration is commonly served by a presigned
+              URL or an embedded token. The job summary is readable by
+              anyone who can see the run, so the executor gets the
+              whole URL and the summary gets an origin and a path.
+
+              Named rather than inlined so the redaction is one
+              decision with one test, instead of a formatting detail
+              that the next writer of a summary line has to remember.
+              """
+              if task.get("kind") != "url":
+                  return task["config"]
+              parts = urllib.parse.urlsplit(task["config"])
+              # 'hostname' drops any userinfo; 'netloc' keeps it.
+              netloc = parts.hostname or ""
+              if parts.port:
+                  netloc = f"{netloc}:{parts.port}"
+              shown = urllib.parse.urlunsplit(
+                  (parts.scheme, netloc, parts.path, "", "")
+              )
+              dropped = []
+              if parts.username or parts.password:
+                  dropped.append("userinfo")
+              if parts.query:
+                  dropped.append("query")
+              if parts.fragment:
+                  dropped.append("fragment")
+              if dropped:
+                  shown = f"{shown} ({'/'.join(dropped)} redacted)"
+              return shown
+
+
+          def hook_ids(cfg, label):
+              # Reject malformed containers rather than skipping them.
+              # Silently ignoring a bad 'repos' entry can turn an
+              # invalid configuration with a non-empty 'ci.skip' into
+              # zero tasks and a green result, which is the outcome
+              # this workflow exists to prevent.
+              #
+              # 'repos' is REQUIRED by pre-commit's schema, so an
+              # absent key is malformed rather than empty. An
+              # explicit 'repos: []' stays valid: that says 'no
+              # hooks' on purpose.
+              if "repos" not in cfg:
+                  fail(f"{label}: missing required 'repos' key")
+              repos = cfg["repos"]
+              if repos is None:
+                  fail(f"{label}: 'repos' must be a list, got null")
+              if not isinstance(repos, list):
+                  fail(f"{label}: 'repos' must be a list")
+              ids = []
+              for index, repo in enumerate(repos):
+                  where = f"{label}: repos[{index}]"
+                  if not isinstance(repo, dict):
+                      fail(f"{where} is not a mapping")
+                  # 'hooks' is REQUIRED by pre-commit's schema, so an
+                  # absent key or an explicit null is malformed, not
+                  # an empty repository. Skipping either would drop
+                  # its hooks from the defined set, and a 'ci.skip'
+                  # naming one would then resolve to no tasks.
+                  if "hooks" not in repo:
+                      fail(f"{where}: missing required 'hooks' key")
+                  hooks = repo["hooks"]
+                  if not isinstance(hooks, list):
+                      fail(f"{where}: 'hooks' must be a list, got"
+                           f" {hooks!r}")
+                  for position, hook in enumerate(hooks):
+                      if not isinstance(hook, dict):
+                          fail(f"{where}: hooks[{position}] is not"
+                               " a mapping")
+                      hook_id = hook.get("id")
+                      # Require a non-empty string. Skipping a hook
+                      # with no id, or coercing a non-string one,
+                      # loses it from the defined set -- and a
+                      # 'ci.skip' naming it then resolves to zero
+                      # tasks and a green result.
+                      if not isinstance(hook_id, str) or not hook_id:
+                          fail(f"{where}: hooks[{position}] needs a"
+                               f" non-empty string 'id', got"
+                               f" {hook_id!r}")
+                      ids.append(hook_id)
+              return ids
+
+
+          # Stages a lint run reaches. prek runs pre-commit hooks, and
+          # manual ones when a task names them; the other nine stages
+          # it passes over without output at exit 0.
+          RUNNABLE_STAGES = frozenset({"pre-commit", "manual"})
+
+
+          def unreachable_stage_hooks(cfg):
+              """Ids the executor cannot run, by declared stage.
+
+              A hook declaring 'stages: [commit-msg]' -- gitlint being
+              the common one -- never runs here, and prek says nothing
+              when it skips one. Left unmentioned, a configuration
+              naming gitlint produces a green check its author reads
+              as covering commit messages.
+
+              Reported rather than refused. Whether such a hook should
+              fail the run belongs to the executor, the only party
+              that knows what it ran, and is tracked as
+              standalone-linting-action#156. Naming them here makes
+              the gap visible at the moment it applies.
+
+              Runs after hook_ids, so container shapes are already
+              validated and a malformed 'stages' is all that is left
+              to step around.
+              """
+              found = []
+              for repo in cfg.get("repos") or []:
+                  for hook in repo.get("hooks") or []:
+                      stages = hook.get("stages")
+                      # Absent means every stage, so the hook runs.
+                      if not isinstance(stages, list):
+                          continue
+                      names = [s for s in stages if isinstance(s, str)]
+                      if names and not RUNNABLE_STAGES.intersection(
+                          names
+                      ):
+                          found.append(
+                              (hook["id"], sorted(set(names)))
+                          )
+              return found
+
+
+          def warn_unreachable_stages(cfg, label):
+              unreachable = unreachable_stage_hooks(cfg)
+              if not unreachable:
+                  return
+              listed = ", ".join(
+                  f"{hid} ({'/'.join(stages)})"
+                  for hid, stages in unreachable
+              )
+              print(
+                  f"::warning::{label} declares hooks at stages this"
+                  f" run does not reach, so they will not run and a"
+                  f" pass here does not cover them: {listed}"
+              )
+
+
+          def ci_skip(cfg, label):
+              # Presence, not non-null. 'ci:' with no value is a
+              # malformed container exactly like the scalar case
+              # below, and 'get' made the two indistinguishable --
+              # so an explicit null returned an empty selection,
+              # zero tasks and a green result, while 'ci: 3' failed.
+              # One idea, two standards, again.
+              if "ci" not in cfg:
+                  return []
+              block = cfg["ci"]
+              if not isinstance(block, dict):
+                  fail(f"{label}: 'ci' must be a mapping, got"
+                       f" {block!r}")
+              # Presence, not non-null: an explicit 'skip:' with no
+              # value is a typo, not an absent key, and returning no
+              # work for it would report green.
+              if "skip" not in block:
+                  return []
+              skip = block["skip"]
+              # A scalar would iterate CHARACTER BY CHARACTER, so
+              # 'skip: mypy' would yield 'm', 'y', 'p', 'y', none of
+              # which match a hook id -- resolving no tasks and
+              # reporting green for a configuration that asked for
+              # work.
+              if not isinstance(skip, list):
+                  fail(f"{label}: 'ci.skip' must be a list of hook"
+                       f" ids, got {type(skip).__name__}")
+              for item in skip:
+                  if not isinstance(item, str):
+                      fail(f"{label}: 'ci.skip' entries must be"
+                           f" strings, got {item!r}")
+              return list(skip)
+
+
+          def parse_hook_list(raw, label):
+              # Validate the DOCUMENTED types. 'raw or ""' would fold
+              # False, 0, {} and [] into the same state as an omitted
+              # selector, and an omitted selector runs every hook --
+              # so a malformed value would broaden execution rather
+              # than fail.
+              if isinstance(raw, str):
+                  items = raw.replace(",", " ").split()
+              elif isinstance(raw, list):
+                  for item in raw:
+                      if not isinstance(item, str):
+                          fail(f"{label} entries must be strings,"
+                               f" got {item!r}")
+                  items = list(raw)
+              else:
+                  fail(f"{label} must be a string or an array of"
+                       f" strings, got {type(raw).__name__}")
+              if not items:
+                  fail(f"{label} is present but empty; omit it to"
+                       " run every hook")
+              for item in items:
+                  if not ID_RE.fullmatch(item):
+                      fail(f"invalid hook id in {label}: {item!r}")
+              return list(dict.fromkeys(items))
+
+
+          # A single-element list so fetch_url can read it without a
+          # 'global' declaration. Set once, at the top of the plan.
+          PLAN_DEADLINE = [time.monotonic() + PLAN_DOWNLOAD_BUDGET]
+
+
+          def fetch_url(url, expect_sha, label):
+              if not URL_RE.fullmatch(url):
+                  fail(f"invalid {label}: not a plain https URL")
+              request = urllib.request.Request(
+                  url, headers={"User-Agent": "lint-plan"}
+              )
+              # A WALL-CLOCK deadline, not urlopen's 'timeout='.
+              # That argument bounds each blocking socket operation,
+              # so a server trickling bytes just inside it keeps a
+              # transfer alive for as long as it likes -- and
+              # planning would accept a URL the executor's
+              # 'curl --max-time 60' refuses, giving a plan that
+              # resolves cleanly and then fails in every lint job.
+              #
+              # Reading in chunks makes the budget observable. The
+              # per-operation timeout stays smaller than the total,
+              # so a stalled socket cannot overshoot the deadline by
+              # more than one chunk read, and the overshoot can only
+              # ever produce a FAILURE -- never an acceptance past
+              # the executor's limit.
+              # The tighter of two deadlines: this download's own
+              # allowance, and whatever remains of the budget shared
+              # by every download in the plan.
+              own_deadline = time.monotonic() + DOWNLOAD_TIMEOUT
+              budget_deadline = PLAN_DEADLINE[0]
+              deadline = min(own_deadline, budget_deadline)
+              # Which limit applies decides which message is true. A
+              # URL started with five seconds of budget left would
+              # otherwise be blamed for exceeding sixty, sending a
+              # caller to look at a URL that was never slow.
+              blame_budget = budget_deadline <= own_deadline
+              if time.monotonic() > budget_deadline:
+                  fail(f"{label}: the plan's total download budget"
+                       f" of {PLAN_DOWNLOAD_BUDGET}s is spent")
+
+              def expired():
+                  if blame_budget:
+                      fail(f"{label}: the plan's total download"
+                           f" budget of {PLAN_DOWNLOAD_BUDGET}s ran"
+                           " out mid-download")
+                  fail(f"{label} took longer than"
+                       f" {DOWNLOAD_TIMEOUT}s to download")
+
+              # An interval timer around the WHOLE exchange, not the
+              # body alone.
+              #
+              # The chunked loop below bounds the body, but
+              # OPENER.open() connects, sends, follows redirects and
+              # reads the status line and headers before returning --
+              # each of those a separate socket operation bounded by
+              # SOCKET_TIMEOUT and by nothing else. A server
+              # trickling header bytes just inside that window keeps
+              # open() blocked indefinitely, and the deadline below
+              # never gets consulted because control has not reached
+              # it. The plan job then hits its ten-minute limit and
+              # GitHub cancels it, which reports no verdict at all --
+              # the outcome PLAN_DOWNLOAD_BUDGET exists to prevent,
+              # reached through the one phase it did not cover.
+              #
+              # SIGALRM interrupts the blocking syscall wherever it
+              # sits, so one timer covers connect, headers, redirects
+              # and body alike. Linux-only, which this workflow
+              # already requires.
+              chunks = []
+              total = 0
+              remaining = deadline - time.monotonic()
+              if remaining <= 0:
+                  expired()
+              previous = signal.signal(signal.SIGALRM, _alarm)
+              signal.setitimer(signal.ITIMER_REAL, remaining)
+              try:
+                  with OPENER.open(
+                      request, timeout=SOCKET_TIMEOUT
+                  ) as response:
+                      if not response.geturl().startswith("https://"):
+                          fail(f"{label} redirected off HTTPS")
+                      while total <= MAX_CONFIG_BYTES:
+                          # read1, NOT read. HTTPResponse.read(n)
+                          # loops on the underlying socket until it
+                          # has n bytes or reaches EOF, so a server
+                          # trickling a few bytes inside every socket
+                          # timeout keeps ONE call blocked
+                          # indefinitely. Measured against a server
+                          # sending 10 bytes every 0.4s:
+                          # read(65536) returned after 3.64s with the
+                          # whole body, read1(65536) after 0.00s with
+                          # 10 bytes.
+                          #
+                          # read1 performs at most one raw read, so
+                          # the deadline below is consulted at most
+                          # one socket operation apart. It returns b''
+                          # at EOF exactly as read does, chunked
+                          # transfers included.
+                          chunk = response.read1(65536)
+                          # Checked immediately after EVERY read,
+                          # before the EOF break below. A server can
+                          # deliver its last bytes inside the budget
+                          # and then sit on the close for a whole
+                          # socket timeout, so a check placed after
+                          # the break would let that transfer through
+                          # late. Belt to the interval timer's braces:
+                          # this reports the overrun in the resolver's
+                          # own vocabulary rather than as a signal.
+                          if time.monotonic() > deadline:
+                              expired()
+                          if not chunk:
+                              break
+                          chunks.append(chunk)
+                          total += len(chunk)
+              except DownloadTimeout:
+                  expired()
+              finally:
+                  signal.setitimer(signal.ITIMER_REAL, 0)
+                  signal.signal(signal.SIGALRM, previous)
+              data = b"".join(chunks)
+              if len(data) > MAX_CONFIG_BYTES:
+                  fail(f"{label} content exceeds 1 MiB")
+              digest = hashlib.sha256(data).hexdigest()
+              if expect_sha and digest != expect_sha.lower():
+                  fail(f"{label} content does not match config_sha256")
+              return data, digest
+
+
+          def stage_url_config(url, expect_sha, tag, label):
+              data, digest = fetch_url(url, expect_sha, label)
+              staged = os.path.join(
+                  env("RUNNER_TEMP"), f"plan-url-{tag}.yaml"
+              )
+              with open(staged, "wb") as handle:
+                  handle.write(data)
+              return staged, digest
+
+
+          # Decode the organisation fallback configuration captured
+          # by the locate step, staging it for local parsing and
+          # recording the blob SHA the lint jobs re-fetch by.
+          # Staged LAZILY, on first use.
+          #
+          # Decoding eagerly made an all-explicit plan pay for a
+          # fallback it never reads: a malformed-but-successful API
+          # response (an org_config_path naming a directory returns
+          # a JSON array, so the metadata lookup raises) failed the
+          # run even though every entry named its own
+          # configuration. Same contract as the deferred primary --
+          # inspect only what will be read.
+          org_json_path = env("ORG_JSON")
+          org_cache = {}
+
+
+          def org_state():
+              """Decode the organisation fallback, once, on demand."""
+              if not org_json_path:
+                  return None
+              if "value" in org_cache:
+                  return org_cache["value"]
+              # Cached BEFORE the checks below cannot run twice: a
+              # second call after a fail() is impossible, so the key
+              # is set on the success path alone.
+              with open(org_json_path, encoding="utf-8") as handle:
+                  meta = json.load(handle)
+              if not isinstance(meta, dict):
+                  fail("unexpected organisation configuration API"
+                       " response: expected an object, got"
+                       f" {type(meta).__name__} (is"
+                       " org_config_path a directory?)")
+              blob = str(meta.get("sha") or "")
+              good_blob = re.fullmatch(r"[0-9a-f]{40}", blob)
+              if meta.get("encoding") != "base64" or not good_blob:
+                  fail("unexpected organisation configuration"
+                       " API response")
+              content = base64.b64decode(meta["content"])
+              # Enforced on the DECODED bytes, so every configuration
+              # source shares one limit. The curl call that fetched
+              # this allows for the base64 envelope and cannot apply
+              # the real limit itself.
+              if len(content) > MAX_CONFIG_BYTES:
+                  fail("organisation configuration exceeds"
+                       f" {MAX_CONFIG_BYTES} bytes")
+              digest = hashlib.sha256(content).hexdigest()
+              staged = os.path.join(
+                  env("RUNNER_TEMP"), "org-lint-config.yaml"
+              )
+              with open(staged, "wb") as handle:
+                  handle.write(content)
+              org_cache["value"] = {
+                  "blob": blob,
+                  "sha256": digest,
+                  "file": staged,
+              }
+              return org_cache["value"]
+
+          primary_repo = env("PRIMARY")
+
+
+          def primary_fields():
+              if primary_repo:
+                  return {
+                      "kind": "repo",
+                      "config": primary_repo,
+                      "sha256": "",
+                      "blob": "",
+                  }
+              state = org_state()
+              if state:
+                  return {
+                      "kind": "org",
+                      "config": env("INPUT_ORG_CONFIG_PATH"),
+                      "sha256": state["sha256"],
+                      "blob": state["blob"],
+                  }
+              return None
+
+
+          def primary_file():
+              if primary_repo:
+                  return contained(
+                      primary_repo, "primary configuration"
+                  )
+              state = org_state()
+              if state:
+                  return state["file"]
+              return None
+
+
+          def defines_hooks(cfg_file, label):
+              """True when a configuration declares at least one hook.
+
+              'repos: []' is VALID -- it says 'no hooks' on purpose,
+              and the loader accepts it deliberately. But prek treats
+              an empty selection as an error:
+
+                  $ prek run --all-files --config cfg.yaml
+                  error: No hooks found after filtering with the
+                  given selectors
+                  exit=1
+
+              so emitting a whole-configuration task for one would
+              turn an intentionally empty configuration into a FAILED
+              lint job. That is the mirror of the silent green this
+              resolver refuses: a valid repository failing a check it
+              had nothing to answer.
+              """
+              return bool(
+                  hook_ids(load_config(cfg_file, label), label)
+              )
+
+
+          def no_primary(label):
+              """Fail because an entry needs a primary that is absent.
+
+              The locate step defers a broken primary configuration to
+              here rather than exiting, because a plan whose every
+              entry names its own config_path or config_url never
+              reads the primary -- and aborting the run would fail
+              tasks that had no use for it. Reaching this point means
+              an entry did fall through, so the deferred reason
+              becomes the failure, with the diagnosis the locate step
+              had and this one does not.
+              """
+              reason = env("PRIMARY_ERROR")
+              if reason:
+                  fail(f"{label} uses the primary configuration,"
+                       f" which is unusable: {reason}")
+              fail(f"{label} uses the primary configuration but none"
+                   " exists")
+
+
+          tasks = []
+
+
+          def add_task(name, fields, hooks):
+              # DERIVED_NAME_RE, not NAME_RE: 'name' here may be a
+              # composite this script built. A caller-supplied label
+              # is checked against NAME_RE where it enters.
+              if not DERIVED_NAME_RE.fullmatch(name):
+                  fail(f"invalid task name: {name!r}")
+              base, suffix = name, 2
+              names = {task["name"] for task in tasks}
+              while name in names:
+                  name = f"{base} {suffix}"
+                  suffix += 1
+              if len(tasks) >= MAX_TASKS:
+                  fail(f"lint plan exceeds {MAX_TASKS} tasks")
+              tasks.append({"name": name, "hooks": hooks, **fields})
+
+
+          def add_hook_tasks(ids, fields, group_name, prefix=None):
+              if env("INPUT_SPLIT_HOOKS") == "true":
+                  for hid in ids:
+                      name = f"{prefix} / {hid}" if prefix else hid
+                      add_task(name, fields, hid)
+              else:
+                  add_task(group_name, fields, " ".join(ids))
+
+
+          def plan_str(entry, key, label, default=""):
+              """Read a documented string field from a plan entry.
+
+              'str(x or default)' would accept any type: {"name": 1}
+              becomes the valid name "1", and a falsey non-string such
+              as {"config_path": false} reads as 'omitted', falling
+              through to the primary configuration and running every
+              hook there. Both are the broadening this resolver exists
+              to refuse, so check the type before defaulting.
+
+              Key PRESENCE decides omission, not the value: an
+              explicit null is a supplied value of the wrong type,
+              and discarding it would drop a field the caller wrote.
+
+              An empty string is a supplied value too. Returning the
+              default for it left {"config_path": ""} falling through
+              to the primary configuration and running every hook
+              there -- the same silent discard, one type further on.
+              Omitting the key is how a caller asks for the default.
+              """
+              if key not in entry:
+                  return default
+              raw = entry[key]
+              if not isinstance(raw, str):
+                  fail(f"{label}: '{key}' must be a string, got"
+                       f" {raw!r}")
+              if not raw:
+                  fail(f"{label}: '{key}' must not be empty; omit"
+                       " the key to use the default")
+              return raw
+
+
+          def check_hooks_defined(ids, cfg_file, label):
+              defined = set(hook_ids(load_config(cfg_file, label),
+                                     label))
+              missing = [h for h in ids if h not in defined]
+              if missing:
+                  fail(f"hooks not defined in {label}:"
+                       f" {' '.join(missing)}")
+
+
+          def ci_skip_ids(cfg, label):
+              """The hook ids to run, from a configuration's ci.skip.
+
+              Every id must be DEFINED in the same configuration.
+              Dropping the undefined ones instead -- which this did --
+              turns a stale or mistyped entry such as
+              'ci.skip: [mypy-typo]' into an empty selection, then
+              into zero tasks and a green check, on a gate the
+              organisation mandates estate-wide. An explicitly
+              requested 'hooks' list already fails on an undefined id;
+              the same concept held to two standards is what let this
+              through.
+
+              An EMPTY ci.skip stays legitimate and selects nothing:
+              that is a repository saying pre-commit.ci skips no
+              hooks, so this workflow has none to pick up.
+
+              Syntax is checked before definedness, over the whole
+              list, so a hostile id is diagnosed as malformed rather
+              than filtered away and reported as merely absent.
+              """
+              ids = list(dict.fromkeys(ci_skip(cfg, label)))
+              for item in ids:
+                  if not ID_RE.fullmatch(item):
+                      fail(f"{label}: invalid hook id in ci.skip:"
+                           f" {item!r}")
+              defined = set(hook_ids(cfg, label))
+              missing = [h for h in ids if h not in defined]
+              if missing:
+                  fail(f"{label}: ci.skip names hooks the"
+                       f" configuration does not define:"
+                       f" {' '.join(missing)}")
+              return ids
+
+
+          def reject_duplicate_keys(pairs):
+              """Build a dict, refusing any key given twice.
+
+              json.loads keeps the LAST occurrence of a duplicate key
+              and says nothing, so a plan entry written
+              '{"hooks": "mypy", "hooks": "ruff"}' discards the mypy
+              the caller wrote and runs ruff alone -- green, having
+              run something other than what the plan says.
+
+              That is the same failure this resolver refuses
+              everywhere else: an input that looks like it ran and
+              did not. A 'hooks' value dropped beside a 'plan' is a
+              hard error, and a duplicate key is the same loss by a
+              quieter route.
+
+              Applied as an object_pairs_hook, so it covers the plan
+              entries as well as the array itself.
+              """
+              seen = set()
+              for key, _ in pairs:
+                  if key in seen:
+                      fail(f"plan has a duplicate key, so one value"
+                           f" would be discarded: {key!r}")
+                  seen.add(key)
+              return dict(pairs)
+
+
+          plan_raw = env("INPUT_PLAN")
+          if plan_raw:
+              try:
+                  entries = json.loads(
+                      plan_raw, object_pairs_hook=reject_duplicate_keys
+                  )
+              except json.JSONDecodeError as exc:
+                  fail(f"plan is not valid JSON: {exc}")
+              if not isinstance(entries, list) or not entries:
+                  fail("plan must be a non-empty JSON array")
+              if len(entries) > MAX_TASKS:
+                  fail(f"plan exceeds {MAX_TASKS} entries")
+              allowed = {
+                  "name",
+                  "config_path",
+                  "config_url",
+                  "config_sha256",
+                  "hooks",
+                  "ci_skipped",
+              }
+              for index, entry in enumerate(entries):
+                  label = f"plan[{index}]"
+                  if not isinstance(entry, dict):
+                      fail(f"{label} is not an object")
+                  unknown = sorted(set(entry) - allowed)
+                  if unknown:
+                      fail(f"{label} has unknown keys: {unknown}")
+                  name = plan_str(
+                      entry, "name", label, f"task-{index + 1}"
+                  )
+                  # Validate the label here rather than in add_task:
+                  # split mode derives task names from hook ids, so a
+                  # hostile 'name' would otherwise reach validation
+                  # only in grouped mode.
+                  if not NAME_RE.fullmatch(name):
+                      fail(f"{label}: invalid name: {name!r}")
+                  cfg_path = plan_str(entry, "config_path", label)
+                  cfg_url = plan_str(entry, "config_url", label)
+                  raw_sha = entry.get("config_sha256")
+                  sha = ""
+                  if "config_sha256" in entry:
+                      # Presence, not non-null: an explicit null is a
+                      # supplied value of the wrong type, and treating
+                      # it as absent would drop the caller's pin.
+                      if not isinstance(raw_sha, str):
+                          fail(f"{label}: config_sha256 must be a"
+                               f" string, got {raw_sha!r}")
+                      # An empty digest is supplied too, and the
+                      # checks below all guard on 'if sha' -- so it
+                      # skipped the format check AND the
+                      # requires-config_url rule, leaving a caller
+                      # believing content was pinned when nothing
+                      # was.
+                      if not raw_sha:
+                          fail(f"{label}: config_sha256 must not be"
+                               " empty; omit the key for no pin")
+                      sha = raw_sha
+                  if cfg_path and cfg_url:
+                      fail(f"{label}: config_path and config_url"
+                           " are mutually exclusive")
+                  if sha and not SHA_RE.fullmatch(sha):
+                      fail(f"{label}: invalid config_sha256")
+                  # Only a config_url task carries a digest forward.
+                  if sha and not cfg_url:
+                      fail(f"{label}: config_sha256 requires"
+                           " config_url")
+                  # A JSON boolean, not a truthy value: the string
+                  # "false" is truthy in Python and would otherwise
+                  # select the opposite execution mode in silence.
+                  raw_ci = entry.get("ci_skipped", False)
+                  if not isinstance(raw_ci, bool):
+                      fail(f"{label}: ci_skipped must be a JSON"
+                           f" boolean, got {raw_ci!r}")
+                  # An explicit false selects nothing. Falling through
+                  # to the 'no selector' branch would run EVERY hook,
+                  # so a caller writing 'ci_skipped: false' would
+                  # broaden the entry rather than narrow it. Omit the
+                  # key to run everything.
+                  if "ci_skipped" in entry and not raw_ci:
+                      fail(f"{label}: ci_skipped must be true, or"
+                           " omitted; false selects no hooks and"
+                           " would run every hook instead")
+                  raw_hooks = entry.get("hooks")
+                  ci_flag = raw_ci
+                  ids = []
+                  if "hooks" in entry:
+                      # Presence, not non-null. 'hooks: null' would
+                      # otherwise read as an omitted selector, and an
+                      # omitted selector runs EVERY hook.
+                      ids = parse_hook_list(
+                          raw_hooks, f"{label}.hooks"
+                      )
+                  # Both KEYS present is the conflict, whatever the
+                  # boolean says. Testing the value accepted
+                  # {"hooks": ..., "ci_skipped": false} and ignored
+                  # the ci_skipped the caller wrote -- the same
+                  # presence-versus-value slip these checks exist to
+                  # refuse elsewhere.
+                  if "ci_skipped" in entry and "hooks" in entry:
+                      fail(f"{label}: hooks and ci_skipped are"
+                           " mutually exclusive")
+                  if cfg_url:
+                      staged, digest = stage_url_config(
+                          cfg_url, sha, str(index), label
+                      )
+                      fields = {
+                          "kind": "url",
+                          "config": cfg_url,
+                          "sha256": digest,
+                          "blob": "",
+                      }
+                      cfg_file = staged
+                  elif cfg_path:
+                      cfg_file = contained(
+                          cfg_path, f"{label}.config_path"
+                      )
+                      fields = {
+                          "kind": "repo",
+                          "config": cfg_path,
+                          "sha256": "",
+                          "blob": "",
+                      }
+                  else:
+                      fields = primary_fields()
+                      cfg_file = primary_file()
+                      if fields is None:
+                          no_primary(label)
+                  # Surface configuration problems at plan time with
+                  # a clear message rather than one job per task.
+                  cfg = load_config(cfg_file, label)
+                  if ci_flag:
+                      ids = ci_skip_ids(cfg, label)
+                      if not ids:
+                          print(f"{label}: ci.skip lists no hooks;"
+                                " entry skipped 💬")
+                          continue
+                      add_hook_tasks(ids, fields, name, prefix=name)
+                  elif ids:
+                      check_hooks_defined(ids, cfg_file, label)
+                      add_hook_tasks(ids, fields, name, prefix=name)
+                  else:
+                      # No selector: run the whole configuration.
+                      # split_hooks governs how a SELECTION is
+                      # divided and does not apply here -- prek runs
+                      # a configuration in its declared order, and
+                      # fanning it out would rebuild every hook
+                      # environment once per job. Documented on the
+                      # split_hooks input; pinned by
+                      # tests/test-lint-plan.sh.
+                      #
+                      # A configuration declaring no hooks yields no
+                      # task, for the reason in defines_hooks: prek
+                      # errors on an empty selection, so the entry
+                      # would fail rather than find nothing to do.
+                      if defines_hooks(cfg_file, label):
+                          add_task(name, fields, "")
+          else:
+              in_hooks = env("INPUT_HOOKS")
+              in_cfg_path = env("INPUT_CONFIG_PATH")
+              in_cfg_url = env("INPUT_CONFIG_URL")
+              in_sha = env("INPUT_CONFIG_SHA256")
+              # The guard step checks this too; repeated here so the
+              # resolver holds the invariant on its own, and so the
+              # fixtures can exercise it.
+              if in_sha and not in_cfg_url:
+                  fail("config_sha256 requires config_url")
+              ids = []
+              if in_hooks:
+                  ids = parse_hook_list(in_hooks, "hooks")
+              if in_cfg_url:
+                  staged, digest = stage_url_config(
+                      in_cfg_url, in_sha, "input", "config_url"
+                  )
+                  fields = {
+                      "kind": "url",
+                      "config": in_cfg_url,
+                      "sha256": digest,
+                      "blob": "",
+                  }
+                  cfg_file = staged
+              elif in_cfg_path:
+                  cfg_file = contained(in_cfg_path, "config_path")
+                  fields = {
+                      "kind": "repo",
+                      "config": in_cfg_path,
+                      "sha256": "",
+                      "blob": "",
+                  }
+              else:
+                  fields = primary_fields()
+                  cfg_file = primary_file()
+                  if fields is None and ids:
+                      # Scalar mode never defers, since the locate
+                      # step exits there; no_primary still gives the
+                      # deferred reason if one ever arrives.
+                      no_primary("hooks")
+              if fields is not None:
+                  # Structure validated for EVERY mode, not just the
+                  # ones that select from it. hook_ids rejects a
+                  # malformed 'repos'/'hooks' shape; without this
+                  # call the run-all default would carry a broken
+                  # configuration to prek, which fails in every lint
+                  # job with its own diagnosis where failing here
+                  # names the offending value once.
+                  parsed_cfg = load_config(
+                      cfg_file, "linting configuration"
+                  )
+                  hook_ids(parsed_cfg, "linting configuration")
+                  # Same parse, second question: which of those hooks
+                  # will a run never reach? Asked here because this
+                  # branch covers every mode, the run-all default
+                  # included -- the one that reports 'all hooks'.
+                  warn_unreachable_stages(
+                      parsed_cfg, "The linting configuration"
+                  )
+              if ids:
+                  check_hooks_defined(
+                      ids, cfg_file, "the linting configuration"
+                  )
+                  add_hook_tasks(ids, fields, "selected-hooks")
+              elif (
+                  fields is not None
+                  and env("INPUT_CI_SKIPPED") == "true"
+              ):
+                  # The hooks pre-commit.ci is told to skip, and so
+                  # the ones nothing else runs.
+                  #
+                  # Tested BEFORE the named-configuration branch
+                  # below. The configuration SOURCE and the hook
+                  # SELECTION are orthogonal -- plan entries have
+                  # always supported the combination -- but in scalar
+                  # mode a config_path reached the run-all branch
+                  # first and discarded the ci_skipped the caller
+                  # wrote. An input that looks like it ran and did
+                  # not is what this resolver refuses everywhere
+                  # else.
+                  #
+                  # Note this differs from the EXECUTOR's default for
+                  # a named configuration, which runs it whole rather
+                  # than falling to its ci.skip. That rule is about
+                  # what to do absent a selector; here the caller
+                  # supplied one.
+                  cfg = load_config(cfg_file, "linting configuration")
+                  selected = ci_skip_ids(cfg, "linting configuration")
+                  if selected:
+                      add_hook_tasks(selected, fields, "ci-skip")
+              elif in_cfg_url or in_cfg_path:
+                  # A named configuration with no hook selector runs
+                  # whole, as one job, for the reason above -- unless
+                  # it declares no hooks (see defines_hooks).
+                  if defines_hooks(cfg_file, "linting configuration"):
+                      add_task("lint-config", fields, "")
+              elif fields is not None:
+                  # Default: the whole configuration, one job.
+                  #
+                  # The inverse of the old default, which ran the
+                  # 'ci.skip' set. That resolved to nothing for
+                  # any repository without pre-commit.ci -- every
+                  # Gerrit-mirrored project among them -- and
+                  # reported green having linted nothing. Running
+                  # everything makes the misconfiguration
+                  # duplicated work instead, which is visible and
+                  # never unsafe.
+                  #
+                  # split_hooks does not divide this, for the
+                  # reason given on that input: it splits a
+                  # SELECTION, and this is not one.
+                  #
+                  # A configuration defining no hooks yields no task:
+                  # see defines_hooks.
+                  if defines_hooks(cfg_file, "linting configuration"):
+                      add_task("lint-all", fields, "")
+
+          has_work = "true" if tasks else "false"
+          matrix = json.dumps(
+              {"include": tasks}, separators=(",", ":")
+          )
+          with open(
+              env("GITHUB_OUTPUT"), "a", encoding="utf-8"
+          ) as handle:
+              handle.write(f"has_work={has_work}\n")
+              if tasks:
+                  handle.write(f"matrix={matrix}\n")
+          with open(
+              env("GITHUB_STEP_SUMMARY"), "a", encoding="utf-8"
+          ) as handle:
+              handle.write("## Lint plan 🧹\n\n")
+              if tasks:
+                  handle.write("| Task | Source | Hooks |\n")
+                  handle.write("| ---- | ------ | ----- |\n")
+                  for task in tasks:
+                      hooks_cell = task["hooks"] or "all"
+                      handle.write(
+                          f"| {task['name']} | {task['kind']}:"
+                          f" {display_config(task)} | {hooks_cell} |\n"
+                      )
+              else:
+                  handle.write(
+                      "No lint tasks resolved; nothing to do ✅\n"
+                  )
+          print(f"Resolved {len(tasks)} lint task(s) 💬")
+          # END lint_plan
+          PYEOF
+
+  lint:
+    name: 'Lint: ${{ matrix.name }}'
+    needs: plan
+    if: needs.plan.outputs.has_work == 'true'
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: ${{ inputs.fail_fast }}
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920  # v2.20.0
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ (inputs.harden_runner_egress == 'block') && 'block' || 'audit' }}
+          allowed-endpoints: >
+            ${{ inputs.harden_runner_allowed_endpoints }}
+
+      # The plan job checks this too, but each matrix job is
+      # scheduled independently: a self-hosted label shared by Linux
+      # and non-Linux runners can plan on Linux and lint elsewhere,
+      # and harden-runner installs its agent per job. Gate again,
+      # before anything is fetched or run.
+      #
+      # The two copies of this rule are proven identical by
+      # tests/test-locate-rules.sh, so one cannot drift into
+      # accepting a runner the other refuses.
+      - name: 'Verify runner hardening'
+        env:
+          INPUT_HARDEN_RUNNER_EGRESS: ${{ inputs.harden_runner_egress }}
+        run: |
+          # Verify runner hardening
+          set -euo pipefail
+
+          # BEGIN harden_check (extracted by tests/test-locate-rules.sh)
+          # Decide whether harden-runner is really monitoring this
+          # job.
+          #
+          # The action returns early -- printing to stdout, neither
+          # warning nor failing -- on 'ubuntu-slim', inside a
+          # container, on community-tier ARM64, on a self-hosted
+          # runner with no agent, and when the repository carries the
+          # 'skip-harden-runner' custom property. RUNNER_OS reads
+          # 'Linux' through every one of them, so a platform test
+          # alone reports a hardened job that is nothing of the sort.
+          #
+          # Test for the AGENT instead of enumerating runner shapes.
+          # Enumerating unsupported labels is a blocklist, and a
+          # runner image added next year walks straight past it; the
+          # agent either started or it did not. On Linux the pre-step
+          # blocks until the agent writes its status file, so by the
+          # time a later step runs the file is there or the agent
+          # never came up. A custom VM image ships the agent already
+          # running and announces itself by environment variable.
+          #
+          # The status file is evidence ONLY on an ephemeral runner.
+          # '/home/agent/agent.status' is precisely what
+          # harden-runner's own isAgentInstalled() tests, and its
+          # self-hosted post-step does not remove it, so on a
+          # persistent runner a file left by an earlier job would
+          # read as 'monitored' with nothing running. Worse,
+          # shouldDeployAgentOnSelfHosted() returns FALSE once it
+          # sees that file, so harden-runner itself then declines to
+          # install -- the stale file both causes the gap and hides
+          # it.
+          #
+          # A GitHub-hosted runner is discarded after the job, so the
+          # file can only be there because this job's pre-step wrote
+          # it. RUNNER_ENVIRONMENT is the same signal harden-runner
+          # branches on (isGithubHosted), so the two agree by
+          # construction rather than by coincidence.
+          #
+          # Anything else reports 'unmonitored', which is the honest
+          # answer regardless: in the community tier harden-runner
+          # installs no agent on a self-hosted runner unless
+          # deploy-on-self-hosted-vm is set, so there was no
+          # enforcement to lose. 'audit' warns and continues;
+          # 'block' stops.
+          harden_runner_verdict() {
+            # $1=RUNNER_OS $2=agent status file $3=custom-image flag
+            # $4=RUNNER_ENVIRONMENT
+            if [ "$1" != 'Linux' ]; then
+              printf 'not-linux'
+              return
+            fi
+            if [ "$4" != 'github-hosted' ]; then
+              printf 'unmonitored'
+              return
+            fi
+            if [ "$3" = 'true' ] || [ -f "$2" ]; then
+              printf 'monitored'
+              return
+            fi
+            printf 'unmonitored'
+          }
+
+          # Act on the verdict. 'not-linux' is a caller mistake and
+          # deterministic, so it fails whatever the policy.
+          #
+          # 'unmonitored' splits on the policy the caller asked for,
+          # because the loss differs. Under 'block' the caller asked
+          # for egress enforcement and is not getting it: hooks the
+          # repository controls would reach the network unchecked
+          # while the check still went green, so stop. Under 'audit'
+          # nothing was ever enforced -- audit records traffic and
+          # blocks none of it -- so the loss is telemetry, and
+          # failing every pull request across the estate over a
+          # vendor outage would cost far more than it saved.
+          harden_runner_gate() {
+            # $1=verdict $2=egress policy
+            case "$1" in
+              not-linux)
+                echo "::error::runs_on must name a Linux runner:" \
+                  "this workflow and harden-runner both require" \
+                  "one (RUNNER_OS=$RUNNER_OS) ❌"
+                return 1
+                ;;
+              unmonitored)
+                if [ "$2" = 'block' ]; then
+                  echo "::error::harden-runner is not monitoring" \
+                    "this runner, so the 'block' egress policy is" \
+                    "not in force ❌"
+                  echo "::error::Repository-defined hooks would" \
+                    "reach the network unchecked while this check" \
+                    "reported green. Use a runner harden-runner" \
+                    "supports (a GitHub-hosted x64 Linux image," \
+                    "not 'ubuntu-slim', not a container job), or" \
+                    "set harden_runner_egress to 'audit'."
+                  return 1
+                fi
+                echo "::warning::harden-runner is not monitoring" \
+                  "this runner; egress is unrecorded. Audit mode" \
+                  "enforces nothing either way, so the run" \
+                  "continues."
+                ;;
+            esac
+            return 0
+          }
+          # END harden_check
+
+          if ! harden_runner_gate \
+            "$(harden_runner_verdict "$RUNNER_OS" \
+              /home/agent/agent.status \
+              "${STEP_SECURITY_HARDEN_RUNNER:-}" \
+              "${RUNNER_ENVIRONMENT:-}")" \
+            "$INPUT_HARDEN_RUNNER_EGRESS"; then
+            exit 1
+          fi
+
+      # Re-fetch the organisation configuration by the blob SHA the
+      # plan job recorded, and verify the digest, so the lint job
+      # runs the identical bytes the plan validated (no TOCTOU).
+      - name: 'Fetch organisation configuration'
+        if: matrix.kind == 'org'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORG: ${{ github.repository_owner }}
+          BLOB_SHA: ${{ matrix.blob }}
+          EXPECT_SHA256: ${{ matrix.sha256 }}
+        run: |
+          # Fetch organisation configuration
+          set -euo pipefail
+          if ! printf '%s' "$BLOB_SHA" |
+            grep -qE '^[0-9a-f]{40}$'; then
+            echo '::error::invalid organisation configuration' \
+              'blob SHA ❌'
+            exit 1
+          fi
+          target="$RUNNER_TEMP/org-lint-config.yaml"
+          curl --proto '=https' --tlsv1.2 --fail --silent \
+            --show-error --max-redirs 3 --max-filesize 1048576 \
+            --max-time 30 \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header 'Accept: application/vnd.github.raw+json' \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            --output "$target" \
+            "$GITHUB_API_URL/repos/$ORG/.github/git/blobs/$BLOB_SHA"
+          digest=$(printf '%s' "$EXPECT_SHA256" |
+            tr '[:upper:]' '[:lower:]')
+          echo "$digest  $target" | sha256sum --check --strict -
+          echo 'Organisation configuration checksum verified ✅'
+
+      - name: 'Run linting'
+        # Pinned to the COMMIT the v0.4.1 annotated tag points at, not
+        # the tag object's own SHA, which 'uses:' cannot resolve.
+        #
+        # v0.3.0 was the first release carrying the prek/hooks support
+        # this workflow calls; v0.4.0 adds the skip_hooks input it
+        # forwards below; v0.4.1 makes that input match a hook's
+        # alias in every mode, and stops a hook whose stage a run
+        # never reaches from reporting a pass.
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/standalone-linting-action@760ff830dcccde04ca780cd2a7ca36e79ebbd530  # v0.4.1
+        with:
+          hooks: ${{ matrix.hooks }}
+          # Forwarded to EVERY task, so an exclusion is a policy for
+          # the run rather than a property of one selection. The
+          # executor applies it, keeping prek's matching in one
+          # place -- including a hook's ALIAS, which prek's '--skip'
+          # accepts as readily as an id, in every mode.
+          skip_hooks: ${{ inputs.skip_hooks }}
+          run_all_hooks: ${{ matrix.hooks == '' && 'true' || 'false' }}
+          # yamllint disable-line rule:line-length
+          config_path: ${{ matrix.kind == 'repo' && matrix.config || (matrix.kind == 'org' && format('{0}/org-lint-config.yaml', runner.temp) || '') }}
+          config_url: ${{ matrix.kind == 'url' && matrix.config || '' }}
+          # yamllint disable-line rule:line-length
+          config_sha256: ${{ matrix.kind == 'url' && matrix.sha256 || '' }}
+          path_prefix: ${{ inputs.path_prefix }}
+          branch_name: ${{ inputs.branch_name }}
+          prek_version: ${{ inputs.prek_version }}
+          # Export the token ONLY for explicitly trusted event
+          # shapes. An allow-list, not a blocklist.
+          #
+          # The hooks are defined by the checked-out repository and
+          # run arbitrary commands, so a token reaching them can be
+          # exfiltrated -- trivially under the default 'audit' egress
+          # policy, which observes rather than blocks -- and a read
+          # token still reads private base-repository content.
+          #
+          # Enumerating the UNSAFE events kept failing: it missed
+          # merge_group, whose temporary merge commit contains the
+          # queued pull requests, and pull_request_review /
+          # pull_request_review_comment, which can check out a fork's
+          # commit while satisfying "not pull_request". Any event
+          # added to GitHub in future would default to trusted, which
+          # is the wrong way round. Listing the safe shapes instead
+          # makes the default withhold.
+          #
+          # Trusted: a push, a schedule or a manual dispatch, all of
+          # which check out base-repository content; and a pull
+          # request whose head is this same repository, where the
+          # hooks and the token share an origin.
+          # yamllint disable-line rule:line-length
+          github_token: ${{ (inputs.export_github_token && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))) && github.token || '' }}

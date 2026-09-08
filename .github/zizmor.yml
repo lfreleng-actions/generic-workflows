@@ -50,5 +50,30 @@ rules:
       - gerrit.yaml:51
       - github.yaml:46
       - github.yaml:59
+      - github.yaml:78
+      - github.yaml:83
+      - github.yaml:96
+
+  stale-action-refs:
+    ignore:
+      # The same placeholder lines, for the same reason. This audit
+      # reports that a pinned SHA does not point to a Git tag, which
+      # is true of an all-zero placeholder and cannot be otherwise:
+      # the whole point is a reference that fails loudly until a
+      # reader substitutes a real release SHA.
+      #
+      # zizmor documents it as a '--pedantic only' audit because the
+      # situation is not a vulnerability, and it is the same lines
+      # impostor-commit already exempts above -- so exempting it here
+      # keeps one decision about these placeholders rather than two.
+      #
+      # Line-scoped and brittle by the same design: editing an
+      # example above a placeholder shifts the line, the entry stops
+      # matching, and the finding reappears rather than a file-wide
+      # ignore hiding a real one.
+      - gerrit.yaml:51
+      - github.yaml:46
+      - github.yaml:59
+      - github.yaml:78
       - github.yaml:83
       - github.yaml:96
