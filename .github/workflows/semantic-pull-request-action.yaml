@@ -10,7 +10,9 @@
 # regression in semantic-pull-request.yaml turns this repository's own
 # check red instead of surfacing first in a downstream project.
 #
-# The reusable is referenced by LOCAL path, so the branch's own copy
+# The reusable is referenced with the self-repository form
+# ('$/'), which resolves this repository at the commit already
+# running, so the branch's own copy
 # runs and no self-pin is needed. Consumers pin a released SHA instead,
 # as examples/semantic-pull-request/github.yaml shows.
 #
@@ -58,7 +60,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read  # Read PR title and commits (avoids 403)
-    uses: ./.github/workflows/semantic-pull-request.yaml
+    uses: $/.github/workflows/semantic-pull-request.yaml
     # No `with:` block: this repository adopts the organisation's
     # Conventional Commits policy unmodified, which is what the
     # reusable's defaults encode. Overriding here would mean shipping a
