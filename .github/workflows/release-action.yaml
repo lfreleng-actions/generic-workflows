@@ -15,7 +15,9 @@
 # exactly the migration examples/release/github.yaml instructs
 # consumers to perform.
 #
-# The reusable is referenced by LOCAL path, so the tag's own copy of
+# The reusable is referenced with the self-repository form
+# ('$/'), which resolves this repository at the commit already
+# running, so the tag's own copy of
 # release.yaml runs. A release therefore always validates the code
 # being released, and no chicken-and-egg self-pin is needed. Consumers
 # instead pin a released SHA, as examples/release/github.yaml shows.
@@ -45,7 +47,7 @@ jobs:
     name: 'Release'
     permissions:
       contents: write  # Draft, then publish, the GitHub release
-    uses: ./.github/workflows/release.yaml
+    uses: $/.github/workflows/release.yaml
     # No `with:` block: this repository adopts the organisation's
     # release-gating policy unmodified, which is what the reusable's
     # defaults encode. Overriding here would mean shipping a policy we

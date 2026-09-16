@@ -14,7 +14,9 @@
 # workflow_call, so it cannot be dispatched directly; this file is what
 # puts "Run workflow" back in the Actions tab.
 #
-# The reusable is referenced by LOCAL path, matching the convention
+# The reusable is referenced with the self-repository form
+# ('$/'), which resolves this repository at the commit already
+# running, matching the convention
 # established in release-action.yaml: the branch's own copy runs, so a
 # run always validates the code on that branch, and no chicken-and-egg
 # self-pin is needed. Consumers instead pin a released SHA, as
@@ -55,7 +57,7 @@ jobs:
     name: 'Clear Action Cache'
     permissions:
       actions: write  # list and delete repository Actions caches
-    uses: ./.github/workflows/clear-action-cache.yaml
+    uses: $/.github/workflows/clear-action-cache.yaml
     with:
       key_pattern: ${{ inputs.key_pattern }}
       ref_filter: ${{ inputs.ref_filter }}
