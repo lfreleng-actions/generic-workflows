@@ -3033,7 +3033,7 @@ jobs:
         # without running -- standalone-linting-action#156 -- so this
         # pin narrows the gap rather than closing it.
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/standalone-linting-action@760ff830dcccde04ca780cd2a7ca36e79ebbd530  # v0.4.1
+        uses: lfreleng-actions/standalone-linting-action@7ad4dc56cdf2600bd792eaa561e56529fa9a85e8  # v0.4.2
         with:
           hooks: ${{ matrix.hooks }}
           # Forwarded to EVERY task, so an exclusion is a policy for
