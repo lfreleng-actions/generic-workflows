@@ -11,8 +11,9 @@
 # truncated single-commit subjects.
 #
 # Dependabot shortens a commit subject that would otherwise be too long
-# by deleting the ' from <old> to <new>' version fragment, while the
-# pull request title keeps it. The subject and title then differ and
+# by deleting the ' from <old> to <new>' version fragment, sometimes
+# with the directory and group context that follows it, while the pull
+# request title keeps all of it. The subject and title then differ and
 # validateSingleCommitMatchesPrTitle fails, blocking a bump nobody can
 # fix without rewriting Dependabot's commit. The gate step below
 # detects exactly that transformation and relaxes the match for it;
@@ -257,7 +258,11 @@ jobs:
           # BEGIN relax_matches (extracted by tests/test-relax-matches.sh)
           # True when SUBJECT is TITLE with exactly one contiguous span
           # removed, that span sitting on whitespace boundaries and
-          # reading 'from <old> to <new>'.
+          # reading 'from <old> to <new>', optionally followed by the
+          # ' in /<dir>' and ' in the <group> group across <N>
+          # directory' context Dependabot appends to a title. Either
+          # value may be a requirement of several tokens, such as
+          # '>= 2.31, < 3'.
           #
           # Taking the longest common prefix and the longest common
           # suffix and requiring them to account for the whole subject
@@ -269,8 +274,37 @@ jobs:
           # left it mid-string.
           relax_matches() {
             local title="$1" subject="$2"
+            local marker=' (via audit fix)' t_pre t_post s_pre s_post
+
+            # Dependabot keeps this marker when it shortens a subject,
+            # and its 72-character cut can then delete the context
+            # after the marker as well as the fragment before it: two
+            # spans, either side of a marker both strings still carry.
+            # Dependabot writes the marker straight after the version
+            # fragment, so the subject's text before it must be the
+            # title's with something removed from the end, and the
+            # subject's text after it must be the title's, or nothing
+            # where the cut took it. A marker anywhere else was moved,
+            # which is drift. Where it sits right, take it out of both
+            # so the deletion reads as the single span it was in the
+            # title. A marker in one string alone is left in place,
+            # and the checks below reject it.
+            if [[ "${title}" == *"${marker}"* ]] \
+              && [[ "${subject}" == *"${marker}"* ]]; then
+              t_pre="${title%%"${marker}"*}"
+              t_post="${title#*"${marker}"}"
+              s_pre="${subject%%"${marker}"*}"
+              s_post="${subject#*"${marker}"}"
+              [ "${#t_pre}" -gt "${#s_pre}" ] || return 1
+              [[ "${t_pre}" == "${s_pre}"* ]] || return 1
+              [ "${s_post}" = "${t_post}" ] || [ -z "${s_post}" ] \
+                || return 1
+              title="${t_pre}${t_post}"
+              subject="${s_pre}${s_post}"
+            fi
+
             local tlen=${#title} slen=${#subject}
-            local p=0 q=0 span trimmed re start end lead
+            local p=0 q=0 span trimmed re start end lead tok val dir
 
             # Something must have been removed, from something.
             [ -n "${subject}" ] || return 1
@@ -322,10 +356,41 @@ jobs:
             [ "${end}" -eq "${tlen}" ] \
               || [ "${title:end:1}" = ' ' ] || return 1
 
-            # Require the classic Dependabot version fragment, and
-            # nothing else.
-            re='^from[[:space:]][^[:space:]]+'
-            re="${re}[[:space:]]to[[:space:]][^[:space:]]+\$"
+            # Require the Dependabot version fragment. Dependabot may
+            # delete the context after it as well: since dependabot-core
+            # d0bf3df its fragment match runs on to ' in /<dir>',
+            # ' (via audit fix)' or the end of the title, so a grouped
+            # title loses its group suffix with the versions, and a
+            # subject still over 72 characters is then cut at its
+            # first ' in '. Accept that context in Dependabot's order
+            # and wording, and nothing else.
+            #
+            # The same change lets a value span several tokens, as a
+            # library requirement can ('^0.20, ^0.21', '~> 1.14 or
+            # ~> 1.15', '1.0.0 <= v < 2.0.0', 'dev-main as 1.0.x-dev').
+            # A value is one token of any shape, then only tokens a
+            # requirement is made of: one carrying a digit, one of
+            # symbols alone, Hex's 'and'/'or', Elm's 'v' or Composer's
+            # 'as'. Words such as 'to', 'in' and prose never qualify,
+            # so neither value can swallow the other or the context
+            # after it.
+            tok='[^[:space:]]+'
+            val='[^[:space:]]*[0-9][^[:space:]]*|[^[:space:][:alnum:]]+'
+            val="${val}|and|or|v|as"
+            val="${tok}([[:space:]](${val}))*"
+
+            # Dependabot interpolates the directory verbatim, so it
+            # may hold spaces. Read it as words up to the next 'in',
+            # which starts the group suffix where there is one.
+            dir='[^i[:space:]][^[:space:]]*|i[^n[:space:]][^[:space:]]*'
+            dir="${dir}|in[^[:space:]]+|i"
+            dir="/[^[:space:]]*([[:space:]](${dir}))*"
+
+            re="^from[[:space:]]${val}[[:space:]]to[[:space:]]${val}"
+            re="${re}([[:space:]]in[[:space:]]${dir})?"
+            re="${re}([[:space:]]in[[:space:]]the[[:space:]]${tok}"
+            re="${re}[[:space:]]group([[:space:]]across[[:space:]][0-9]+"
+            re="${re}[[:space:]]director(y|ies))?)?\$"
             [[ "${trimmed}" =~ ${re} ]]
           }
           # END relax_matches

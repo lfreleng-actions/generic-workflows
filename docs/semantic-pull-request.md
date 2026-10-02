@@ -44,12 +44,37 @@ request title keeps it. The two then differ, and the action's exact
 `validateSingleCommitMatchesPrTitle` check fails on a bump nobody can
 fix without rewriting Dependabot's commit.
 
-The gate detects that specific transformation and nothing else. It
-takes the longest common prefix and the longest common suffix of the
-title and the subject; when the two runs together account for the whole
-subject, a single contiguous span differs. Whitespace or the ends of
-the title must delimit that span, once trimmed, on **both** sides, and
-it must read `from <old> to <new>`.
+The deletion can take the context after the versions with it. Since
+[dependabot-core `d0bf3df`](https://github.com/dependabot/dependabot-core/commit/d0bf3df097c99b863050d549c002de99d83711a8)
+the fragment match runs on to an `in /<dir>` suffix,
+`(via audit fix)` or the end of the title, so a grouped title loses
+its `in the <group> group across <N> directory` suffix too. A subject
+still over 72 characters is then cut at its first ` in `, which can
+remove a directory as well. The same change matches each value up to
+that boundary instead of the next space, so a version range
+containing spaces, such as `^0.20, ^0.21`, goes as a whole. The
+`(via audit fix)` marker stays in the subject, so the cut can leave a
+deletion either side of it.
+
+The gate detects that specific transformation and nothing else. Where
+both strings carry the audit fix marker, it must sit where Dependabot
+writes it: straight after the version fragment in the title, with the
+subject keeping the title's text after the marker whole or not at
+all. Anywhere else, someone moved it, and the match stays strict.
+Where it sits right, the gate removes it from each string, once. It
+then takes the longest common prefix and the longest common suffix of
+the title and the subject; when the two runs together account for the
+whole subject, a single contiguous span differs. Whitespace or the ends
+of the title must delimit that span, once trimmed, on **both** sides,
+and it must read `from <old> to <new>`. Each value is one token of any
+shape, then any number of range tokens: a token carrying a digit, a
+token of symbols alone such as `>=`, `||` or `≥`, or one of `and` and
+`or` (Hex), `v` (Elm) and `as` (Composer). Anything after that must be
+the context Dependabot appends to a title, in Dependabot's order and
+wording: `in /<dir>`, then `in the <group> group`, then
+`across <N> directory` (or `directories`). Dependabot writes the
+directory verbatim, so it may contain spaces, up to the `in` that
+starts a group suffix.
 
 <!-- markdownlint-disable MD013 -->
 
@@ -58,20 +83,29 @@ it must read `from <old> to <new>`.
 | `Chore: Bump cryptography from 49.0.0 to 50.0.0 in the uv group across 1 directory`                                    | `Chore: Bump cryptography in the uv group across 1 directory`                                     | relax    |
 | `CI(deps): Bump github-security-report from 0.8.0 to 0.10.0 in /.github/runtime-pin`                                   | `CI(deps): Bump github-security-report in /.github/runtime-pin`                                   | relax    |
 | `CI(actions): Bump lfit/releng-reusable-workflows/.github/workflows/reuse-openssf-scorecard.yaml from 0.9.1 to 0.10.1` | `CI(actions): Bump lfit/releng-reusable-workflows/.github/workflows/reuse-openssf-scorecard.yaml` | relax    |
+| `Chore: Bump virtualenv from 20.36.1 to 21.7.13 in the uv group across 1 directory`                                    | `Chore: Bump virtualenv`                                                                          | relax    |
+| `Chore: Bump typing-extensions from 4.12.2 to 4.15.0 in /requirements/dev in the uv group across 1 directory`          | `Chore: Bump typing-extensions`                                                                   | relax    |
+| `Chore: Bump opentelemetry-instrumentation-requests from 0.48b0 to 0.49b0 (via audit fix) in the uv group`             | `Chore: Bump opentelemetry-instrumentation-requests (via audit fix)`                              | relax    |
 | `Chore: Bump dependamerge from 0.9.2 to 0.10.0`                                                                        | `Chore: Bump dependamerge from 0.9.2 to 0.9.3`                                                    | strict   |
 | `Chore: Bump requests from 1.0 to 2.0`                                                                                 | `Chore: Bump urllib3 from 1.0 to 2.0`                                                             | strict   |
+| `Chore: Bump foo from 1 to 2 in the middle`                                                                            | `Chore: Bump foo`                                                                                 | strict   |
 
 <!-- markdownlint-enable MD013 -->
 
-The fourth row is the one worth dwelling on. Someone moved the title to
-a newer version while the commit subject kept the old one, so nothing
-went missing and the prefix plus suffix do not cover the subject. That
-drift is precisely what the check exists to catch, and it keeps
-failing.
+The `dependamerge` row is the one worth dwelling on. Someone moved the
+title to a newer version while the commit subject kept the old one, so
+nothing went missing and the prefix plus suffix do not cover the
+subject. That drift is precisely what the check exists to catch, and it
+keeps failing.
 
 The rule is a strict superset of the leading-substring test it replaces:
 the trailing-fragment case is the one where the common suffix has
-length zero. Nothing that passed before starts failing.
+length zero. Accepting Dependabot's trailing context and multi-token
+ranges widens it again without narrowing it. The one exception is an
+audit fix marker placed where Dependabot never writes it, such as
+`Bump foo (via audit fix) from 1 to 2`, which an earlier revision
+accepted as a trailing fragment. Nothing Dependabot writes that passed
+before starts failing.
 
 Three guards sit outside the rule and survive the migration intact: the
 author must be `dependabot[bot]`, the pull request must have one

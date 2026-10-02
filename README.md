@@ -101,13 +101,16 @@ it adds one thing the action cannot express: a narrow exception for
 Dependabot's truncated single-commit subjects.
 
 Dependabot shortens a long commit subject by deleting the
-`from <old> to <new>` version fragment while the pull request title
-keeps it, so the two differ and the exact single-commit match fails on
-a bump nobody can fix without rewriting Dependabot's commit. The gate
-step recognises that specific deletion — one contiguous span, on
-whitespace boundaries, reading `from <old> to <new>` — and relaxes the
-match for it alone. Genuine drift, such as a title updated to a newer
-version while the commit subject keeps the old one, still fails.
+`from <old> to <new>` version fragment, and sometimes the directory
+and group context after it, while the pull request title keeps them,
+so the two differ and the exact single-commit match fails on a bump
+nobody can fix without rewriting Dependabot's commit. The gate step
+recognises that specific deletion — one contiguous span, on whitespace
+boundaries, reading `from <old> to <new>` where either value may be a
+multi-token version range, optionally with Dependabot's own trailing
+context and audit fix marker — and relaxes the match for it alone.
+Genuine drift, such as a title updated to a newer version while the
+commit subject keeps the old one, still fails.
 
 <!-- markdownlint-disable MD013 -->
 
