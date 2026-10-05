@@ -163,11 +163,16 @@ reporting nothing to do.
 prek runs `pre-commit` hooks, plus `manual` ones when a task names
 them. It passes over the other nine stages without output and exits
 zero, so a hook declaring `stages: [commit-msg]` — `gitlint` being
-the common one — **never runs here**.
+the common one — does not run unless asked for.
 
-What changed in `v0.5.0` is what happens next. A task naming such a
-hook used to collect a tick for it; the executor now **refuses the
-run** and names the stage:
+`commit_range` asks for it. Set it to a `<from>..<to>` range and the
+selected hooks also run at the `commit-msg` stage, once per commit in
+the range, against that commit's message. For a pull request, a range
+from the base commit to the head commit covers the commits under
+review.
+
+Without it, a task naming such a hook **fails the run** rather than
+reporting a pass it did not earn:
 
 <!-- markdownlint-disable MD013 -->
 
@@ -179,8 +184,13 @@ run** and names the stage:
 
 That holds with or without an exclusion in play, so a green check no
 longer depends on which inputs a caller happened to set. A repository
-whose `ci.skip` names `gitlint` gets a failure that says as much,
-rather than a pass it did not earn.
+whose `ci.skip` names `gitlint` gets a failure that says as much, and
+`commit_range` is the answer to it.
+
+Setting `commit_range` makes the executor fetch full history, and
+refuse a range whose endpoints are missing, whose ends reach a
+shallow boundary, or that selects no commits. Linting part of a range
+would be the same silent green under another name.
 
 A **run-all** task names no hooks, so there is no request to refuse
 and nothing fails. The plan job warns instead, naming any hook the
@@ -650,29 +660,30 @@ lint job for a reason nobody could reasonably trace.
 
 <!-- markdownlint-disable MD013 -->
 
-| Input                             | Type      | Default                           | Effect                                                 |
-| --------------------------------- | --------- | --------------------------------- | ------------------------------------------------------ |
-| `plan`                            | `string`  | `''`                              | JSON array of lint tasks; exclusive with the scalars   |
-| `hooks`                           | `string`  | `''`                              | Space/comma separated hook ids to run                  |
-| `skip_hooks`                      | `string`  | `''`                              | Hook ids to EXCLUDE; applies to every task             |
-| `ci_skipped`                      | `boolean` | `false`                           | Run the `ci.skip` set; exclusive with `hooks`          |
-| `config_path`                     | `string`  | `''`                              | Repository-relative configuration path                 |
-| `config_url`                      | `string`  | `''`                              | HTTPS configuration URL                                |
-| `config_sha256`                   | `string`  | `''`                              | Expected digest; requires `config_url`                 |
-| `path_prefix`                     | `string`  | `.`                               | Config directory; if non-root, absence fails           |
-| `org_fallback`                    | `boolean` | `true`                            | Fall back to the organisation's `.github` repository   |
-| `org_fallback_required`           | `boolean` | `false`                           | Fail when the fallback lookup cannot reach a verdict   |
-| `org_config_path`                 | `string`  | `linting/.pre-commit-config.yaml` | Fallback path inside that repository                   |
-| `split_hooks`                     | `boolean` | `true`                            | One matrix job per SELECTED hook                       |
-| `per_hook_runs`                   | `boolean` | `false`                           | One prek invocation per hook, within a job             |
-| `fail_fast`                       | `boolean` | `false`                           | Cancel remaining lint jobs when one fails              |
-| `branch_name`                     | `string`  | `''`                              | Checkout this branch first (for `no-commit-to-branch`) |
-| `export_github_token`             | `boolean` | `true`                            | Export the workflow token to hooks on trusted events   |
-| `prek_version`                    | `string`  | `0.4.14`                          | prek version used to run the hooks                     |
-| `runs_on`                         | `string`  | `ubuntu-latest`                   | Runner label; Linux, and harden-runner must support it |
-| `timeout_minutes`                 | `number`  | `15`                              | Timeout for each lint job                              |
-| `harden_runner_egress`            | `string`  | `audit`                           | `audit` or `block`                                     |
-| `harden_runner_allowed_endpoints` | `string`  | GitHub, PyPI/uv, Node, cache      | Allow-list applied when blocking                       |
+| Input                             | Type      | Default                           | Effect                                                  |
+| --------------------------------- | --------- | --------------------------------- | ------------------------------------------------------- |
+| `plan`                            | `string`  | `''`                              | JSON array of lint tasks; exclusive with the scalars    |
+| `hooks`                           | `string`  | `''`                              | Space/comma separated hook ids to run                   |
+| `skip_hooks`                      | `string`  | `''`                              | Hook ids to EXCLUDE; applies to every task              |
+| `ci_skipped`                      | `boolean` | `false`                           | Run the `ci.skip` set; exclusive with `hooks`           |
+| `config_path`                     | `string`  | `''`                              | Repository-relative configuration path                  |
+| `config_url`                      | `string`  | `''`                              | HTTPS configuration URL                                 |
+| `config_sha256`                   | `string`  | `''`                              | Expected digest; requires `config_url`                  |
+| `path_prefix`                     | `string`  | `.`                               | Config directory; if non-root, absence fails            |
+| `org_fallback`                    | `boolean` | `true`                            | Fall back to the organisation's `.github` repository    |
+| `org_fallback_required`           | `boolean` | `false`                           | Fail when the fallback lookup cannot reach a verdict    |
+| `org_config_path`                 | `string`  | `linting/.pre-commit-config.yaml` | Fallback path inside that repository                    |
+| `split_hooks`                     | `boolean` | `true`                            | One matrix job per SELECTED hook                        |
+| `per_hook_runs`                   | `boolean` | `false`                           | One prek invocation per hook, within a job              |
+| `commit_range`                    | `string`  | `''`                              | `<from>..<to>`; also runs commit-msg stage hooks        |
+| `fail_fast`                       | `boolean` | `false`                           | Cancel remaining lint jobs when one fails               |
+| `branch_name`                     | `string`  | `''`                              | Checkout this branch first (for `no-commit-to-branch`)  |
+| `export_github_token`             | `boolean` | `true`                            | Export the workflow token to hooks on trusted events    |
+| `prek_version`                    | `string`  | `0.4.14`                          | prek version used to run the hooks                      |
+| `runs_on`                         | `string`  | `ubuntu-latest`                   | Runner label; Linux, and harden-runner must support it  |
+| `timeout_minutes`                 | `number`  | `15`                              | Timeout for each lint job                               |
+| `harden_runner_egress`            | `string`  | `audit`                           | `audit` or `block`                                      |
+| `harden_runner_allowed_endpoints` | `string`  | GitHub, PyPI/uv, Node, cache      | Allow-list applied when blocking                        |
 
 <!-- markdownlint-enable MD013 -->
 

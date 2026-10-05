@@ -238,6 +238,31 @@ on:
         required: false
         type: boolean
         default: false
+      commit_range:
+        description: >-
+          A '<from>..<to>' revision range. When set, the selected
+          hooks ALSO run at the commit-msg stage, once per commit in
+          the range, against that commit's message. This is how
+          gitlint and other commit-msg hooks reach CI; without it
+          they never run, and naming one fails the run rather than
+          reporting a pass it did not earn.
+
+          For a pull request, a range from the base commit to the
+          head commit covers the commits under review; the caller
+          builds it from the event context and passes it here.
+
+          The executor fetches full history when this is set, and
+          refuses a range whose endpoints are missing, whose ends
+          reach a shallow boundary, or that selects no commits --
+          linting part of a range would be the silent green this
+          workflow exists to prevent.
+
+          Each side is held to [A-Za-z0-9][A-Za-z0-9._/~^-]* here as
+          well as in the executor, because the value reaches a
+          command line in both.
+        required: false
+        type: string
+        default: ''
       fail_fast:
         description: 'Cancel remaining lint jobs when one fails'
         required: false
@@ -390,6 +415,7 @@ jobs:
           INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
           INPUT_ORG_CONFIG_PATH: ${{ inputs.org_config_path }}
           INPUT_BRANCH_NAME: ${{ inputs.branch_name }}
+          INPUT_COMMIT_RANGE: ${{ inputs.commit_range }}
           INPUT_PREK_VERSION: ${{ inputs.prek_version }}
           INPUT_HARDEN_RUNNER_EGRESS: ${{ inputs.harden_runner_egress }}
           # The same shapes the token export trusts, so one idea
@@ -653,6 +679,37 @@ jobs:
           check_path "$INPUT_ORG_CONFIG_PATH" 'org_config_path'
           if [ -n "$INPUT_BRANCH_NAME" ]; then
             check_path "$INPUT_BRANCH_NAME" 'branch_name'
+          fi
+          # commit_range reaches a command line here and in the
+          # executor, so both hold it to the same contract rather
+          # than one trusting the other. Control characters first:
+          # 'grep -qE ^...$' anchors per LINE, so a value whose first
+          # line matched would otherwise pass.
+          if [ -n "$INPUT_COMMIT_RANGE" ]; then
+            if [[ "$INPUT_COMMIT_RANGE" == *[$'\n\r\t\v\f']* ]]; then
+              err 'commit_range must not contain control characters'
+            else
+              case "$INPUT_COMMIT_RANGE" in
+                *..*..*)
+                  err "commit_range takes one '..'"
+                  ;;
+                *..*)
+                  range_from=${INPUT_COMMIT_RANGE%%..*}
+                  range_to=${INPUT_COMMIT_RANGE#*..}
+                  for side in "$range_from" "$range_to"; do
+                    # A leading '-' reads as an option wherever this
+                    # lands, and an empty side names no commit.
+                    if ! printf '%s' "$side" |
+                      grep -qE '^[A-Za-z0-9][A-Za-z0-9._/~^-]*$'; then
+                      err "invalid revision in commit_range: $side"
+                    fi
+                  done
+                  ;;
+                *)
+                  err "commit_range must read '<from>..<to>'"
+                  ;;
+              esac
+            fi
           fi
           if [ -n "$INPUT_HOOKS" ]; then
             if [[ "$INPUT_HOOKS" == *[$'\n\r\t\v\f']* ]]; then
@@ -3074,6 +3131,7 @@ jobs:
           # than letting the expression stringify it.
           # yamllint disable-line rule:line-length
           per_hook_runs: ${{ inputs.per_hook_runs && 'true' || 'false' }}
+          commit_range: ${{ inputs.commit_range }}
           # yamllint disable-line rule:line-length
           config_path: ${{ matrix.kind == 'repo' && matrix.config || (matrix.kind == 'org' && format('{0}/org-lint-config.yaml', runner.temp) || '') }}
           config_url: ${{ matrix.kind == 'url' && matrix.config || '' }}
