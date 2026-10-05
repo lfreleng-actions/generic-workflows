@@ -1591,6 +1591,24 @@ jobs:
 
 
           MAX_TASKS = 50
+          # 1 MiB, and the same ceiling the GitHub Contents API uses,
+          # so the organisation fallback and config_url agree on what
+          # they accept.
+          #
+          # Measured rather than assumed, because the API is
+          # documented as '1 MB' and that could have meant
+          # 1,000,000. It does not -- real files either side of both
+          # candidates:
+          #
+          #     995,588  base64
+          #   1,013,732  base64      (above 1,000,000)
+          #   1,039,256  base64
+          #   1,049,481  encoding 'none', content empty
+          #
+          # So the cut sits between 1,039,256 and 1,049,481, which
+          # brackets 1,048,576 alone. Lowering this constant would
+          # refuse configurations the API serves happily; raising it
+          # would accept ones the fallback cannot fetch.
           MAX_CONFIG_BYTES = 1048576
           # Matches the executor's 'curl --max-time 60', which is a
           # TOTAL deadline. The planner must refuse what the executor
