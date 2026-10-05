@@ -265,6 +265,11 @@ names is worth keeping straight:
 | `split_hooks`   | a selection across matrix **jobs**      |
 | `per_hook_runs` | the prek **invocations** inside one job |
 
+Two shapes ignore `per_hook_runs`. A run-all task has no selection to
+divide, so it stays one invocation; and the `commit-msg` stage runs
+once per commit whatever the input says, because per hook *and* per
+commit would multiply the runs for no added signal.
+
 prek names the failing hook in its own output either way, so
 `per_hook_runs` buys the summary table rather than the diagnosis.
 
@@ -674,7 +679,7 @@ lint job for a reason nobody could reasonably trace.
 | `org_fallback_required`           | `boolean` | `false`                           | Fail when the fallback lookup cannot reach a verdict    |
 | `org_config_path`                 | `string`  | `linting/.pre-commit-config.yaml` | Fallback path inside that repository                    |
 | `split_hooks`                     | `boolean` | `true`                            | One matrix job per SELECTED hook                        |
-| `per_hook_runs`                   | `boolean` | `false`                           | One prek invocation per hook, within a job              |
+| `per_hook_runs`                   | `boolean` | `false`                           | One prek invocation per hook; ignored by run-all        |
 | `commit_range`                    | `string`  | `''`                              | `<from>..<to>`; also runs commit-msg stage hooks        |
 | `fail_fast`                       | `boolean` | `false`                           | Cancel remaining lint jobs when one fails               |
 | `branch_name`                     | `string`  | `''`                              | Checkout this branch first (for `no-commit-to-branch`)  |

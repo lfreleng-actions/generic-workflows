@@ -224,6 +224,14 @@ on:
           carries one row per hook, so a failure is attributable at
           a glance.
 
+          Two task shapes ignore it. A RUN-ALL task is a single
+          invocation by nature, having no selection to divide, so
+          this gives it nothing. And the commit-msg stage, reached
+          through commit_range, runs one invocation per commit
+          whatever this says: per hook and per commit would multiply
+          the runs, and prek's output still names the hook that
+          failed.
+
           Distinct from split_hooks, which divides a selection across
           matrix JOBS. This divides the prek invocations inside one
           job, and the two compose: split_hooks: false with
@@ -685,31 +693,60 @@ jobs:
           # than one trusting the other. Control characters first:
           # 'grep -qE ^...$' anchors per LINE, so a value whose first
           # line matched would otherwise pass.
-          if [ -n "$INPUT_COMMIT_RANGE" ]; then
-            if [[ "$INPUT_COMMIT_RANGE" == *[$'\n\r\t\v\f']* ]]; then
-              err 'commit_range must not contain control characters'
-            else
-              case "$INPUT_COMMIT_RANGE" in
-                *..*..*)
-                  err "commit_range takes one '..'"
-                  ;;
-                *..*)
-                  range_from=${INPUT_COMMIT_RANGE%%..*}
-                  range_to=${INPUT_COMMIT_RANGE#*..}
-                  for side in "$range_from" "$range_to"; do
-                    # A leading '-' reads as an option wherever this
-                    # lands, and an empty side names no commit.
-                    if ! printf '%s' "$side" |
-                      grep -qE '^[A-Za-z0-9][A-Za-z0-9._/~^-]*$'; then
-                      err "invalid revision in commit_range: $side"
-                    fi
-                  done
-                  ;;
-                *)
-                  err "commit_range must read '<from>..<to>'"
-                  ;;
-              esac
+          # BEGIN input_rules (extracted by tests/test-locate-rules.sh)
+          # Decide whether a commit_range is one this workflow will
+          # pass on. Echoes 'ok', or the reason it will not.
+          #
+          # A function rather than an inline block so a fixture can
+          # call it. The grammar is security-sensitive -- the value
+          # reaches a command line here and in the executor -- and an
+          # inline rule in a 'run:' step is reachable by no test in
+          # this repository.
+          commit_range_verdict() {
+            # $1=value
+            # Control characters first: 'grep -qE ^...$' anchors per
+            # LINE, so a value whose first line matched would
+            # otherwise pass the pattern below.
+            if [[ "$1" == *[$'\n\r\t\v\f']* ]]; then
+              printf 'control-characters'
+              return
             fi
+            case "$1" in
+              *..*..*) printf 'multiple-separators'; return ;;
+              *..*) ;;
+              *) printf 'not-a-range'; return ;;
+            esac
+            local side
+            for side in "${1%%..*}" "${1#*..}"; do
+              # Must START alphanumeric: a leading '-' reads as an
+              # option wherever this lands, and an empty side names
+              # no commit.
+              if ! printf '%s' "$side" |
+                grep -qE '^[A-Za-z0-9][A-Za-z0-9._/~^-]*$'; then
+                printf 'bad-revision'
+                return
+              fi
+            done
+            printf 'ok'
+          }
+          # END input_rules
+
+          if [ -n "$INPUT_COMMIT_RANGE" ]; then
+            case "$(commit_range_verdict "$INPUT_COMMIT_RANGE")" in
+              ok) ;;
+              control-characters)
+                err 'commit_range must not contain control characters'
+                ;;
+              multiple-separators)
+                err "commit_range takes one '..'"
+                ;;
+              not-a-range)
+                err "commit_range must read '<from>..<to>'"
+                ;;
+              *)
+                err 'commit_range has an invalid revision'
+                ;;
+            esac
           fi
           if [ -n "$INPUT_HOOKS" ]; then
             if [[ "$INPUT_HOOKS" == *[$'\n\r\t\v\f']* ]]; then
@@ -1498,6 +1535,7 @@ jobs:
           INPUT_CONFIG_PATH: ${{ inputs.config_path }}
           INPUT_CONFIG_URL: ${{ inputs.config_url }}
           INPUT_CONFIG_SHA256: ${{ inputs.config_sha256 }}
+          INPUT_COMMIT_RANGE: ${{ inputs.commit_range }}
           INPUT_SPLIT_HOOKS: ${{ inputs.split_hooks }}
           INPUT_ORG_CONFIG_PATH: ${{ inputs.org_config_path }}
           PRIMARY: ${{ steps.locate.outputs.primary }}
@@ -1591,24 +1629,32 @@ jobs:
 
 
           MAX_TASKS = 50
-          # 1 MiB, and the same ceiling the GitHub Contents API uses,
-          # so the organisation fallback and config_url agree on what
-          # they accept.
+          # 1 MiB, chosen to match the ceiling above which the GitHub
+          # Contents API stops returning base64 -- the organisation
+          # fallback reads its file through that API, while
+          # config_url fetches the bytes directly, so a mismatch
+          # would refuse through one source what the other accepts.
           #
           # Measured rather than assumed, because the API is
           # documented as '1 MB' and that could have meant
-          # 1,000,000. It does not -- real files either side of both
-          # candidates:
+          # 1,000,000. Real files, either side:
           #
           #     995,588  base64
-          #   1,013,732  base64      (above 1,000,000)
+          #   1,013,732  base64
           #   1,039,256  base64
           #   1,049,481  encoding 'none', content empty
           #
-          # So the cut sits between 1,039,256 and 1,049,481, which
-          # brackets 1,048,576 alone. Lowering this constant would
-          # refuse configurations the API serves happily; raising it
-          # would accept ones the fallback cannot fetch.
+          # 1,013,732 settles the documented question: the cut is NOT
+          # at 1,000,000.
+          #
+          # Where it sits exactly is unproven. The samples bracket it
+          # to 1,039,257..1,049,480, and no public file could be
+          # found inside that window to narrow it further, so
+          # 1,048,576 is an inference from the bracket rather than a
+          # measurement. Any residual disagreement is therefore at
+          # most ~9 KiB wide, against the ~48 KiB the original report
+          # supposed -- and a pre-commit configuration approaching a
+          # megabyte of YAML is a problem of its own.
           MAX_CONFIG_BYTES = 1048576
           # Matches the executor's 'curl --max-time 60', which is a
           # TOTAL deadline. The planner must refuse what the executor
@@ -1945,9 +1991,24 @@ jobs:
               return ids
 
 
+          # 'commit-msg' joins both sets when commit_range is set:
+          # the executor then runs the selection at that stage as
+          # well, so a hook declaring it is reachable after all and
+          # warning about it would send a caller to fix something
+          # that works.
+          #
+          # Mirrors the executor's own rule rather than restating it
+          # loosely -- the two deciding differently is how a warning
+          # and a refusal end up disagreeing about one hook.
+          COMMIT_MSG_STAGES = (
+              frozenset({"commit-msg"})
+              if env("INPUT_COMMIT_RANGE")
+              else frozenset()
+          )
+
           # Stages an unqualified 'prek run --all-files' executes.
           # Measured with one hook per stage: only pre-commit ran.
-          RUN_ALL_STAGES = frozenset({"pre-commit"})
+          RUN_ALL_STAGES = frozenset({"pre-commit"}) | COMMIT_MSG_STAGES
 
           # Stages 'prek run -- <id>' executes. Naming a hook on the
           # command line falls back to the manual stage (prek 0.2.20),
@@ -1955,7 +2016,9 @@ jobs:
           # sets differ, and using one for both would either miss a
           # manual-only hook in a run-all task or warn about one that
           # runs perfectly well when named.
-          NAMED_STAGES = frozenset({"pre-commit", "manual"})
+          NAMED_STAGES = (
+              frozenset({"pre-commit", "manual"}) | COMMIT_MSG_STAGES
+          )
 
           def effective_stages(cfg, hook):
               """The stages a hook runs at, as this file declares them.
