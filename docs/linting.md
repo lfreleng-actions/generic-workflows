@@ -244,6 +244,20 @@ something may actually read the result, so naming a `config_path` or
 `split_hooks` (default `true`) gives each selected hook its own matrix
 job. Set it `false` to run them in one job instead.
 
+`per_hook_runs` (default `false`) divides something else: the number
+of times prek runs **inside** one job. The default hands the whole
+selection to prek at once; setting it invokes prek per hook, so the
+job summary carries one row each. The two compose, and the pair of
+names is worth keeping straight:
+
+|                 | divides                                 |
+| --------------- | --------------------------------------- |
+| `split_hooks`   | a selection across matrix **jobs**      |
+| `per_hook_runs` | the prek **invocations** inside one job |
+
+prek names the failing hook in its own output either way, so
+`per_hook_runs` buys the summary table rather than the diagnosis.
+
 The trade is wall-clock time against billable minutes, and worth
 stating plainly. Within a single job prek runs repository fetches and
 hook environment setup concurrently, and shares toolchains between
@@ -650,6 +664,7 @@ lint job for a reason nobody could reasonably trace.
 | `org_fallback_required`           | `boolean` | `false`                           | Fail when the fallback lookup cannot reach a verdict   |
 | `org_config_path`                 | `string`  | `linting/.pre-commit-config.yaml` | Fallback path inside that repository                   |
 | `split_hooks`                     | `boolean` | `true`                            | One matrix job per SELECTED hook                       |
+| `per_hook_runs`                   | `boolean` | `false`                           | One prek invocation per hook, within a job             |
 | `fail_fast`                       | `boolean` | `false`                           | Cancel remaining lint jobs when one fails              |
 | `branch_name`                     | `string`  | `''`                              | Checkout this branch first (for `no-commit-to-branch`) |
 | `export_github_token`             | `boolean` | `true`                            | Export the workflow token to hooks on trusted events   |

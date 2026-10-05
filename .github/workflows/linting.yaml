@@ -217,6 +217,27 @@ on:
         required: false
         type: boolean
         default: true
+      per_hook_runs:
+        description: >-
+          Within a job, invoke prek once per selected hook rather
+          than running the selection together. The job summary then
+          carries one row per hook, so a failure is attributable at
+          a glance.
+
+          Distinct from split_hooks, which divides a selection across
+          matrix JOBS. This divides the prek invocations inside one
+          job, and the two compose: split_hooks: false with
+          per_hook_runs: true gives a single job whose summary still
+          names each hook.
+
+          Costs a process start and a configuration parse per hook.
+          prek runs hooks concurrently and shares their environments,
+          so the default leaves it to do that. prek names the failing
+          hook in its own output either way, so this buys the summary
+          table rather than the diagnosis.
+        required: false
+        type: boolean
+        default: false
       fail_fast:
         description: 'Cancel remaining lint jobs when one fails'
         required: false
@@ -3048,6 +3069,11 @@ jobs:
           # accepts as readily as an id, in every mode.
           skip_hooks: ${{ inputs.skip_hooks }}
           run_all_hooks: ${{ matrix.hooks == '' && 'true' || 'false' }}
+          # A boolean input arrives as a true boolean here and the
+          # executor takes a string, so render it explicitly rather
+          # than letting the expression stringify it.
+          # yamllint disable-line rule:line-length
+          per_hook_runs: ${{ inputs.per_hook_runs && 'true' || 'false' }}
           # yamllint disable-line rule:line-length
           config_path: ${{ matrix.kind == 'repo' && matrix.config || (matrix.kind == 'org' && format('{0}/org-lint-config.yaml', runner.temp) || '') }}
           config_url: ${{ matrix.kind == 'url' && matrix.config || '' }}
