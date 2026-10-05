@@ -1928,12 +1928,14 @@ jobs:
               then failed the run anyway.
 
               So silence here means 'the configuration does not say',
-              never 'every hook runs'. The message says as much, and
-              the complete answer belongs to the executor, which
-              knows what it ran -- standalone-linting-action#156.
+              never 'every hook runs'. The message says as much.
 
-              Reported rather than refused. Whether such a hook should
-              fail the run is that same issue's decision.
+              Reported rather than refused, and that division is now
+              settled rather than pending. Where a task NAMES hooks
+              the executor refuses one it cannot reach (v0.5.0), and
+              it needs no manifest to decide, having asked prek. This
+              warning therefore speaks for the run-all shape, which
+              names nothing and so has no request to refuse.
 
               Runs after hook_ids, so container shapes are already
               validated and a malformed 'stages' is all that is left
@@ -3017,23 +3019,26 @@ jobs:
           echo 'Organisation configuration checksum verified ✅'
 
       - name: 'Run linting'
-        # Pinned to the COMMIT the v0.4.1 annotated tag points at, not
+        # Pinned to the COMMIT the v0.6.0 annotated tag points at, not
         # the tag object's own SHA, which 'uses:' cannot resolve.
         #
-        # v0.3.0 was the first release carrying the prek/hooks support
-        # this workflow calls; v0.4.0 adds the skip_hooks input it
-        # forwards below; v0.4.1 makes that input match a hook's
-        # alias in every mode, and stops a SURVIVING duplicate whose
-        # remaining instances sit at an unreachable stage from
-        # collecting a tick.
+        # The releases this workflow depends on, newest first:
         #
-        # That last one applies where an exclusion is in play, which
-        # is what engages the executor's resolver. A hook named
-        # directly with no exclusion set can still report a pass
-        # without running -- standalone-linting-action#156 -- so this
-        # pin narrows the gap rather than closing it.
+        #   v0.6.0  commit_range, so commit-msg hooks reach CI
+        #   v0.5.0  refuses a hook no run can reach; runs a selection
+        #           in one invocation; guards prek_version and
+        #           config_sha256 for control characters
+        #   v0.4.1  skip_hooks matches a hook's alias in every mode
+        #   v0.4.0  the skip_hooks input itself
+        #   v0.3.0  the prek/hooks support this workflow calls
+        #
+        # v0.5.0 closed the gap this pin used to carry. A hook named
+        # directly, with no exclusion to engage the resolver, used to
+        # report a pass without running; the executor now refuses it
+        # and names the stage. So a green check from this workflow no
+        # longer depends on whether an exclusion happened to be set.
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/standalone-linting-action@7ad4dc56cdf2600bd792eaa561e56529fa9a85e8  # v0.4.2
+        uses: lfreleng-actions/standalone-linting-action@8485e9964141710c75d168ac03ea2d4c98e579c1  # v0.6.0
         with:
           hooks: ${{ matrix.hooks }}
           # Forwarded to EVERY task, so an exclusion is a policy for

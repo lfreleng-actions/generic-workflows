@@ -165,29 +165,30 @@ them. It passes over the other nine stages without output and exits
 zero, so a hook declaring `stages: [commit-msg]` — `gitlint` being
 the common one — **never runs here**.
 
-That matters for what a green check means. From `v0.4.1` the executor
-drops such a hook from the reported set rather than recording a tick
-against it — but that applies where an exclusion is in play, which is
-what engages its resolver. A plain task naming a `commit-msg` hook
-with no exclusion set can still record a pass without running it,
-which is the open case below. The executor does not run the hook
-either way, and this workflow offers no way to ask for one.
+What changed in `v0.5.0` is what happens next. A task naming such a
+hook used to collect a tick for it; the executor now **refuses the
+run** and names the stage:
 
-A repository whose `.pre-commit-config.yaml` declares `gitlint`
-should not read a green check here as proof that its commit
-messages passed that hook. Run those hooks in a dedicated job until
-lfreleng-actions/standalone-linting-action#143 lands.
+<!-- markdownlint-disable MD013 -->
 
-One edge remains open, tracked as
-lfreleng-actions/standalone-linting-action#156: the executor applies
-the stage filter where an exclusion is in play, and a task naming
-such a hook with no exclusion set can still report a pass.
+```console
+::error::requested hooks run at no stage this action reaches: gitlint (commit-msg) ❌
+```
 
-The plan job warns when the configuration declares such a hook, which
-helps but does **not** cover everything. It reads the configuration
-and nothing else, while a remote hook takes its stages from its own
-repository's `.pre-commit-hooks.yaml` — and that is the ordinary
-spelling:
+<!-- markdownlint-enable MD013 -->
+
+That holds with or without an exclusion in play, so a green check no
+longer depends on which inputs a caller happened to set. A repository
+whose `ci.skip` names `gitlint` gets a failure that says as much,
+rather than a pass it did not earn.
+
+A **run-all** task names no hooks, so there is no request to refuse
+and nothing fails. The plan job warns instead, naming any hook the
+configuration declares at an unreachable stage.
+
+That warning reads the configuration and nothing else, while a remote
+hook takes its stages from its own repository's
+`.pre-commit-hooks.yaml` — and that is the ordinary spelling:
 
 ```yaml
   - repo: https://github.com/jorisroovers/gitlint
@@ -202,8 +203,9 @@ stopped doing because a hook excluded for being unavailable then
 failed the run anyway.
 
 So **silence from that warning means "the configuration does not
-say", not "every hook runs"**. Treat it as a help, not a guarantee,
-until #156 lands.
+say", not "every hook runs"**. Under run-all, treat it as a help
+rather than a guarantee; where a task names hooks, the executor's
+refusal is the guarantee, and it needs no manifest to reach it.
 
 Every id under `ci.skip` must name a hook the same configuration
 defines. A stale or mistyped entry fails the run rather than dropping
