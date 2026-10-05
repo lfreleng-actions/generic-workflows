@@ -228,6 +228,7 @@ check() {
     INPUT_CONFIG_PATH='' \
     INPUT_CONFIG_URL='' \
     INPUT_CONFIG_SHA256='' \
+    INPUT_COMMIT_RANGE='' \
     INPUT_CI_SKIPPED='false' \
     INPUT_SPLIT_HOOKS='true' \
     INPUT_ORG_CONFIG_PATH='linting/.pre-commit-config.yaml' \
@@ -1303,6 +1304,37 @@ accept 'a configuration with a commit-msg hook still plans' \
 stdout_contains 'the unreachable hook is named' 'gitlint'
 stdout_contains 'its stage is named' 'commit-msg'
 stdout_contains 'it is a warning annotation' '::warning::'
+
+# ...unless commit_range is set, which is how the executor reaches
+# that stage. Warning then would send a caller to fix something that
+# works, and would put the planner and the executor into open
+# disagreement about one hook.
+printf '%s\n' 'repos:
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff
+        entry: "true"
+        language: system
+      - id: gitlint
+        name: gitlint
+        entry: "true"
+        language: system
+        stages: [commit-msg]' \
+  > "${stage_dir}/.pre-commit-config.yaml"
+
+accept 'a commit-msg hook with commit_range plans' \
+  GITHUB_WORKSPACE="${stage_dir}" PRIMARY='.pre-commit-config.yaml' \
+  INPUT_COMMIT_RANGE='aaaa..bbbb'
+stdout_lacks 'commit_range silences the stage warning' '::warning::'
+
+# The same range under a NAMED selection, which uses the other
+# stage set: both must gain commit-msg, or one task shape keeps
+# warning about a hook the run executes.
+accept 'a named commit-msg hook with commit_range plans' \
+  GITHUB_WORKSPACE="${stage_dir}" PRIMARY='.pre-commit-config.yaml' \
+  INPUT_COMMIT_RANGE='aaaa..bbbb' INPUT_HOOKS='gitlint'
+stdout_lacks 'named tasks gain commit-msg too' '::warning::'
 
 # The reachable hook must NOT be reported: a warning naming every
 # hook is one nobody reads, and ruff runs perfectly well.

@@ -54,12 +54,12 @@ extracted="${workdir}/rules.sh"
 # block indentation measured from each BEGIN marker itself, so the
 # extraction survives the workflow being re-nested.
 awk '
-  /# BEGIN (locate_rules|plan_conflicts|harden_check)/ {
+  /# BEGIN (locate_rules|plan_conflicts|harden_check|input_rules)/ {
     indent = match($0, /[^ ]/) - 1
     capture = 1
     next
   }
-  /# END (locate_rules|plan_conflicts|harden_check)/ { capture = 0; next }
+  /# END (locate_rules|plan_conflicts|harden_check|input_rules)/ { capture = 0; next }
   capture { print substr($0, indent + 1) }
 ' "${workflow}" > "${extracted}"
 
@@ -97,7 +97,7 @@ fi
 for fn in dangling_component org_status_verdict org_absence_verdict \
   contained_in_workspace explicit_prefix_empty single_line \
   primary_problem skip_prefilter plan_conflicts \
-  harden_runner_verdict harden_runner_gate; do
+  commit_range_verdict harden_runner_verdict harden_runner_gate; do
   if ! grep -q "${fn}()" "${extracted}"; then
     echo "ERROR: no ${fn}() between the markers in" >&2
     echo "       ${workflow}" >&2
@@ -536,6 +536,68 @@ if ! grep -qE '^ *\[ -z "\$primary_error" \] && \[ -f "\$candidate" \]; then$' \
   echo '       would have ignored in favour of prek.toml.' >&2
   exit 1
 fi
+
+# --- commit_range_verdict ---------------------------------------------
+#
+# The value reaches a command line here and in the executor, so the
+# grammar is security-sensitive. Table-driven, because the ways to
+# get a range wrong outnumber the ways to get it right, and the
+# accepted shapes have to stay accepted: an over-tight rule would
+# refuse ordinary revisions and send callers to work around it.
+
+check_range() {
+  local desc="$1" value="$2" expect="$3" got
+
+  got="$(commit_range_verdict "${value}")"
+  if [ "${got}" = "${expect}" ]; then
+    report yes "${desc}" "${expect}" "${got}"
+  else
+    report no "${desc}" "${expect}" "${got}"
+  fi
+}
+
+# Shapes a caller legitimately passes.
+check_range 'two commit ids' 'abc123..def456' 'ok'
+check_range 'branch names' 'main..HEAD' 'ok'
+check_range 'a tag and a relative ref' 'v1.0.0..HEAD~2' 'ok'
+check_range 'a caret ancestor' 'HEAD^..HEAD' 'ok'
+check_range 'a remote-tracking ref' 'origin/main..HEAD' 'ok'
+check_range 'a dotted tag either side' 'v1.2.3..v1.2.4' 'ok'
+
+# A single ref is not a range: prek needs both ends, and accepting
+# one would leave the executor to guess which commits were meant.
+check_range 'a bare ref' 'HEAD' 'not-a-range'
+check_range 'an empty-looking separator' '...' 'bad-revision'
+
+# Git's three-dot symmetric difference means something else, and
+# this workflow passes the value on as a two-dot range. It splits as
+# 'a' and '.b', so the right side trips the revision rule rather
+# than the separator count -- rejected either way, and the fixture
+# records which, so a future edit cannot quietly start accepting it.
+check_range 'three dots' 'a...b' 'bad-revision'
+check_range 'two separators' 'a..b..c' 'multiple-separators'
+
+# A missing side names no commit.
+check_range 'no left side' '..b' 'bad-revision'
+check_range 'no right side' 'a..' 'bad-revision'
+
+# The one that matters most: a leading '-' reads as an option
+# wherever this lands.
+check_range 'option-shaped left side' '-rf..HEAD' 'bad-revision'
+check_range 'option-shaped right side' 'HEAD..--help' 'bad-revision'
+
+# Shell metacharacters have no place in a revision.
+check_range 'a semicolon' 'a;rm -rf /..b' 'bad-revision'
+check_range 'a space' 'a b..c' 'bad-revision'
+# shellcheck disable=SC2016  # a literal '$', not an expansion
+check_range 'a dollar' 'a..$(id)' 'bad-revision'
+
+# Control characters are caught BEFORE the pattern, because
+# 'grep -qE ^...$' anchors per line and would pass a value whose
+# first line matched.
+check_range 'a newline' "$(printf 'a..b\nevil')" 'control-characters'
+check_range 'a carriage return' "$(printf 'a..b\r')" 'control-characters'
+check_range 'a tab' "$(printf 'a..b\tx')" 'control-characters'
 
 # --- primary_problem --------------------------------------------------
 #

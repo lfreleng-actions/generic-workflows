@@ -98,10 +98,20 @@ jobs:
     #   # hooks it is told to skip (one parallel job each):
     #   ci_skipped: true
     #   # Run a named subset of the primary configuration instead.
-    #   # Name hooks that run at the 'pre-commit' or 'manual' stage:
-    #   # a 'commit-msg' hook such as gitlint never runs here, and
-    #   # naming one buys a green check it did not earn.
+    #   # Hooks at the 'pre-commit' or 'manual' stage run as named;
+    #   # a 'commit-msg' hook such as gitlint needs commit_range
+    #   # below, and naming one without it FAILS the run rather than
+    #   # reporting a pass it did not earn.
     #   hooks: 'mypy ruff'
+    #   # Also run the selected hooks at the commit-msg stage, once
+    #   # per commit in the range -- this is how gitlint reaches CI.
+    #   # For a pull request, base SHA to head SHA covers the commits
+    #   # under review; build it from the event context.
+    #   commit_range: ''
+    #   # Invoke prek once per hook, so the job summary carries one
+    #   # row each. A run-all task ignores it, having no selection to
+    #   # divide, as does the commit-msg stage.
+    #   per_hook_runs: true
     #   # Or the inverse -- everything EXCEPT these. This is the
     #   # equivalent of compose-repo-linting's pre_commit_skips, and
     #   # applies to every task including plan entries:

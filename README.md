@@ -214,6 +214,8 @@ failure.
 | `org_fallback_required` | `boolean` | `false`                           | Fail when the fallback lookup reaches no verdict     |
 | `org_config_path`       | `string`  | `linting/.pre-commit-config.yaml` | Fallback path inside that repository                 |
 | `split_hooks`           | `boolean` | `true`                            | One matrix job per SELECTED hook                     |
+| `per_hook_runs`         | `boolean` | `false`                           | One prek invocation per hook; ignored by run-all     |
+| `commit_range`          | `string`  | `''`                              | `<from>..<to>`; also runs commit-msg stage hooks     |
 | `export_github_token`   | `boolean` | `true`                            | Export the workflow token to hooks on trusted events |
 | `runs_on`               | `string`  | `ubuntu-latest`                   | Runner label; harden-runner must support it          |
 

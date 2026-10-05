@@ -217,6 +217,60 @@ on:
         required: false
         type: boolean
         default: true
+      per_hook_runs:
+        description: >-
+          Within a job, invoke prek once per selected hook rather
+          than running the selection together. The job summary then
+          carries one row per hook, so a failure is attributable at
+          a glance.
+
+          Two task shapes ignore it. A RUN-ALL task is a single
+          invocation by nature, having no selection to divide, so
+          this gives it nothing. And the commit-msg stage, reached
+          through commit_range, runs one invocation per commit
+          whatever this says: per hook and per commit would multiply
+          the runs, and prek's output still names the hook that
+          failed.
+
+          Distinct from split_hooks, which divides a selection across
+          matrix JOBS. This divides the prek invocations inside one
+          job, and the two compose: split_hooks: false with
+          per_hook_runs: true gives a single job whose summary still
+          names each hook.
+
+          Costs a process start and a configuration parse per hook.
+          prek runs hooks concurrently and shares their environments,
+          so the default leaves it to do that. prek names the failing
+          hook in its own output either way, so this buys the summary
+          table rather than the diagnosis.
+        required: false
+        type: boolean
+        default: false
+      commit_range:
+        description: >-
+          A '<from>..<to>' revision range. When set, the selected
+          hooks ALSO run at the commit-msg stage, once per commit in
+          the range, against that commit's message. This is how
+          gitlint and other commit-msg hooks reach CI; without it
+          they never run, and naming one fails the run rather than
+          reporting a pass it did not earn.
+
+          For a pull request, a range from the base commit to the
+          head commit covers the commits under review; the caller
+          builds it from the event context and passes it here.
+
+          The executor fetches full history when this is set, and
+          refuses a range whose endpoints are missing, whose ends
+          reach a shallow boundary, or that selects no commits --
+          linting part of a range would be the silent green this
+          workflow exists to prevent.
+
+          Each side is held to [A-Za-z0-9][A-Za-z0-9._/~^-]* here as
+          well as in the executor, because the value reaches a
+          command line in both.
+        required: false
+        type: string
+        default: ''
       fail_fast:
         description: 'Cancel remaining lint jobs when one fails'
         required: false
@@ -369,6 +423,7 @@ jobs:
           INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
           INPUT_ORG_CONFIG_PATH: ${{ inputs.org_config_path }}
           INPUT_BRANCH_NAME: ${{ inputs.branch_name }}
+          INPUT_COMMIT_RANGE: ${{ inputs.commit_range }}
           INPUT_PREK_VERSION: ${{ inputs.prek_version }}
           INPUT_HARDEN_RUNNER_EGRESS: ${{ inputs.harden_runner_egress }}
           # The same shapes the token export trusts, so one idea
@@ -632,6 +687,66 @@ jobs:
           check_path "$INPUT_ORG_CONFIG_PATH" 'org_config_path'
           if [ -n "$INPUT_BRANCH_NAME" ]; then
             check_path "$INPUT_BRANCH_NAME" 'branch_name'
+          fi
+          # commit_range reaches a command line here and in the
+          # executor, so both hold it to the same contract rather
+          # than one trusting the other. Control characters first:
+          # 'grep -qE ^...$' anchors per LINE, so a value whose first
+          # line matched would otherwise pass.
+          # BEGIN input_rules (extracted by tests/test-locate-rules.sh)
+          # Decide whether a commit_range is one this workflow will
+          # pass on. Echoes 'ok', or the reason it will not.
+          #
+          # A function rather than an inline block so a fixture can
+          # call it. The grammar is security-sensitive -- the value
+          # reaches a command line here and in the executor -- and an
+          # inline rule in a 'run:' step is reachable by no test in
+          # this repository.
+          commit_range_verdict() {
+            # $1=value
+            # Control characters first: 'grep -qE ^...$' anchors per
+            # LINE, so a value whose first line matched would
+            # otherwise pass the pattern below.
+            if [[ "$1" == *[$'\n\r\t\v\f']* ]]; then
+              printf 'control-characters'
+              return
+            fi
+            case "$1" in
+              *..*..*) printf 'multiple-separators'; return ;;
+              *..*) ;;
+              *) printf 'not-a-range'; return ;;
+            esac
+            local side
+            for side in "${1%%..*}" "${1#*..}"; do
+              # Must START alphanumeric: a leading '-' reads as an
+              # option wherever this lands, and an empty side names
+              # no commit.
+              if ! printf '%s' "$side" |
+                grep -qE '^[A-Za-z0-9][A-Za-z0-9._/~^-]*$'; then
+                printf 'bad-revision'
+                return
+              fi
+            done
+            printf 'ok'
+          }
+          # END input_rules
+
+          if [ -n "$INPUT_COMMIT_RANGE" ]; then
+            case "$(commit_range_verdict "$INPUT_COMMIT_RANGE")" in
+              ok) ;;
+              control-characters)
+                err 'commit_range must not contain control characters'
+                ;;
+              multiple-separators)
+                err "commit_range takes one '..'"
+                ;;
+              not-a-range)
+                err "commit_range must read '<from>..<to>'"
+                ;;
+              *)
+                err 'commit_range has an invalid revision'
+                ;;
+            esac
           fi
           if [ -n "$INPUT_HOOKS" ]; then
             if [[ "$INPUT_HOOKS" == *[$'\n\r\t\v\f']* ]]; then
@@ -1420,6 +1535,7 @@ jobs:
           INPUT_CONFIG_PATH: ${{ inputs.config_path }}
           INPUT_CONFIG_URL: ${{ inputs.config_url }}
           INPUT_CONFIG_SHA256: ${{ inputs.config_sha256 }}
+          INPUT_COMMIT_RANGE: ${{ inputs.commit_range }}
           INPUT_SPLIT_HOOKS: ${{ inputs.split_hooks }}
           INPUT_ORG_CONFIG_PATH: ${{ inputs.org_config_path }}
           PRIMARY: ${{ steps.locate.outputs.primary }}
@@ -1513,6 +1629,32 @@ jobs:
 
 
           MAX_TASKS = 50
+          # 1 MiB, chosen to match the ceiling above which the GitHub
+          # Contents API stops returning base64 -- the organisation
+          # fallback reads its file through that API, while
+          # config_url fetches the bytes directly, so a mismatch
+          # would refuse through one source what the other accepts.
+          #
+          # Measured rather than assumed, because the API is
+          # documented as '1 MB' and that could have meant
+          # 1,000,000. Real files, either side:
+          #
+          #     995,588  base64
+          #   1,013,732  base64
+          #   1,039,256  base64
+          #   1,049,481  encoding 'none', content empty
+          #
+          # 1,013,732 settles the documented question: the cut is NOT
+          # at 1,000,000.
+          #
+          # Where it sits exactly is unproven. The samples bracket it
+          # to 1,039,257..1,049,480, and no public file could be
+          # found inside that window to narrow it further, so
+          # 1,048,576 is an inference from the bracket rather than a
+          # measurement. Any residual disagreement is therefore at
+          # most ~9 KiB wide, against the ~48 KiB the original report
+          # supposed -- and a pre-commit configuration approaching a
+          # megabyte of YAML is a problem of its own.
           MAX_CONFIG_BYTES = 1048576
           # Matches the executor's 'curl --max-time 60', which is a
           # TOTAL deadline. The planner must refuse what the executor
@@ -1849,9 +1991,24 @@ jobs:
               return ids
 
 
+          # 'commit-msg' joins both sets when commit_range is set:
+          # the executor then runs the selection at that stage as
+          # well, so a hook declaring it is reachable after all and
+          # warning about it would send a caller to fix something
+          # that works.
+          #
+          # Mirrors the executor's own rule rather than restating it
+          # loosely -- the two deciding differently is how a warning
+          # and a refusal end up disagreeing about one hook.
+          COMMIT_MSG_STAGES = (
+              frozenset({"commit-msg"})
+              if env("INPUT_COMMIT_RANGE")
+              else frozenset()
+          )
+
           # Stages an unqualified 'prek run --all-files' executes.
           # Measured with one hook per stage: only pre-commit ran.
-          RUN_ALL_STAGES = frozenset({"pre-commit"})
+          RUN_ALL_STAGES = frozenset({"pre-commit"}) | COMMIT_MSG_STAGES
 
           # Stages 'prek run -- <id>' executes. Naming a hook on the
           # command line falls back to the manual stage (prek 0.2.20),
@@ -1859,7 +2016,9 @@ jobs:
           # sets differ, and using one for both would either miss a
           # manual-only hook in a run-all task or warn about one that
           # runs perfectly well when named.
-          NAMED_STAGES = frozenset({"pre-commit", "manual"})
+          NAMED_STAGES = (
+              frozenset({"pre-commit", "manual"}) | COMMIT_MSG_STAGES
+          )
 
           def effective_stages(cfg, hook):
               """The stages a hook runs at, as this file declares them.
@@ -1928,12 +2087,14 @@ jobs:
               then failed the run anyway.
 
               So silence here means 'the configuration does not say',
-              never 'every hook runs'. The message says as much, and
-              the complete answer belongs to the executor, which
-              knows what it ran -- standalone-linting-action#156.
+              never 'every hook runs'. The message says as much.
 
-              Reported rather than refused. Whether such a hook should
-              fail the run is that same issue's decision.
+              Reported rather than refused, and that division is now
+              settled rather than pending. Where a task NAMES hooks
+              the executor refuses one it cannot reach (v0.5.0), and
+              it needs no manifest to decide, having asked prek. This
+              warning therefore speaks for the run-all shape, which
+              names nothing and so has no request to refuse.
 
               Runs after hook_ids, so container shapes are already
               validated and a malformed 'stages' is all that is left
@@ -3017,23 +3178,26 @@ jobs:
           echo 'Organisation configuration checksum verified ✅'
 
       - name: 'Run linting'
-        # Pinned to the COMMIT the v0.4.1 annotated tag points at, not
+        # Pinned to the COMMIT the v0.6.0 annotated tag points at, not
         # the tag object's own SHA, which 'uses:' cannot resolve.
         #
-        # v0.3.0 was the first release carrying the prek/hooks support
-        # this workflow calls; v0.4.0 adds the skip_hooks input it
-        # forwards below; v0.4.1 makes that input match a hook's
-        # alias in every mode, and stops a SURVIVING duplicate whose
-        # remaining instances sit at an unreachable stage from
-        # collecting a tick.
+        # The releases this workflow depends on, newest first:
         #
-        # That last one applies where an exclusion is in play, which
-        # is what engages the executor's resolver. A hook named
-        # directly with no exclusion set can still report a pass
-        # without running -- standalone-linting-action#156 -- so this
-        # pin narrows the gap rather than closing it.
+        #   v0.6.0  commit_range, so commit-msg hooks reach CI
+        #   v0.5.0  refuses a hook no run can reach; runs a selection
+        #           in one invocation; guards prek_version and
+        #           config_sha256 for control characters
+        #   v0.4.1  skip_hooks matches a hook's alias in every mode
+        #   v0.4.0  the skip_hooks input itself
+        #   v0.3.0  the prek/hooks support this workflow calls
+        #
+        # v0.5.0 closed the gap this pin used to carry. A hook named
+        # directly, with no exclusion to engage the resolver, used to
+        # report a pass without running; the executor now refuses it
+        # and names the stage. So a green check from this workflow no
+        # longer depends on whether an exclusion happened to be set.
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/standalone-linting-action@7ad4dc56cdf2600bd792eaa561e56529fa9a85e8  # v0.4.2
+        uses: lfreleng-actions/standalone-linting-action@8485e9964141710c75d168ac03ea2d4c98e579c1  # v0.6.0
         with:
           hooks: ${{ matrix.hooks }}
           # Forwarded to EVERY task, so an exclusion is a policy for
@@ -3043,6 +3207,12 @@ jobs:
           # accepts as readily as an id, in every mode.
           skip_hooks: ${{ inputs.skip_hooks }}
           run_all_hooks: ${{ matrix.hooks == '' && 'true' || 'false' }}
+          # A boolean input arrives as a true boolean here and the
+          # executor takes a string, so render it explicitly rather
+          # than letting the expression stringify it.
+          # yamllint disable-line rule:line-length
+          per_hook_runs: ${{ inputs.per_hook_runs && 'true' || 'false' }}
+          commit_range: ${{ inputs.commit_range }}
           # yamllint disable-line rule:line-length
           config_path: ${{ matrix.kind == 'repo' && matrix.config || (matrix.kind == 'org' && format('{0}/org-lint-config.yaml', runner.temp) || '') }}
           config_url: ${{ matrix.kind == 'url' && matrix.config || '' }}
