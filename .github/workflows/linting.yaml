@@ -335,36 +335,18 @@ on:
         description: >-
           Harden-runner egress policy: 'audit' or 'block'. Defaults
           to 'audit' because hook environments legitimately download
-          from hook-specific hosts the allow-list below cannot
-          predict. Callers with a known hook set should pass 'block'
-          and extend harden_runner_allowed_endpoints.
+          from hook-specific hosts the organisation allow-list may not
+          carry. Callers with a known hook set should pass 'block',
+          adding any hosts their hooks need to that list.
         required: false
         type: string
         default: 'audit'
-      harden_runner_allowed_endpoints:
-        description: >-
-          Newline-separated host:port allow-list applied when
-          harden_runner_egress is 'block'. The default covers GitHub,
-          PyPI/uv and the Node.js toolchain hosts prek uses, plus the
-          Actions cache service the pinned executor restores from -- a
-          dependency internal to this workflow, which a caller cannot
-          reasonably be expected to discover.
+      harden_runner_allowlist:
+        description: 'Out-of-band harden-runner allow-list configuration'
         required: false
         type: string
-        default: |
-          api.github.com:443
-          codeload.github.com:443
-          github.com:443
-          objects.githubusercontent.com:443
-          raw.githubusercontent.com:443
-          release-assets.githubusercontent.com:443
-          astral.sh:443
-          pypi.org:443
-          files.pythonhosted.org:443
-          registry.npmjs.org:443
-          nodejs.org:443
-          *.actions.githubusercontent.com:443
-          *.blob.core.windows.net:443
+        # yamllint disable-line rule:line-length
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@ac32415b91e0b6db1166bc451024c472cdbcbd3d'  # v0.16.8
 
     outputs:
       # 'true'/'false' from a fixed vocabulary; safe to use in a
@@ -402,6 +384,12 @@ jobs:
           || steps.locate.outputs.has_work }}
       matrix: ${{ steps.resolve.outputs.matrix }}
     steps:
+      - name: 'Load harden-runner allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
@@ -409,7 +397,7 @@ jobs:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ (inputs.harden_runner_egress == 'block') && 'block' || 'audit' }}
           allowed-endpoints: >
-            ${{ inputs.harden_runner_allowed_endpoints }}
+            ${{ env.CONNECTION_ALLOW_LIST }}
 
       - name: 'Guard trigger and validate inputs'
         env:
@@ -812,8 +800,8 @@ jobs:
           # selects the policy. That expression has to fall back to
           # something, and 'audit' is this workflow's documented
           # default, so a typo such as 'blok' would quietly weaken a
-          # caller who asked to block. Nothing but the harden-runner
-          # step itself runs before this check, so failing here still
+          # caller who asked to block. Nothing but the two hardening
+          # steps runs before this check, so failing here still
           # precedes every hook.
           case "$INPUT_HARDEN_RUNNER_EGRESS" in
             audit|block) ;;
@@ -2968,6 +2956,15 @@ jobs:
       fail-fast: ${{ inputs.fail_fast }}
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
+      - name: 'Load harden-runner allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+          # The plan job's summary already shows the list; repeat it
+          # on one matrix leg, not every one.
+          allow_list_summary: ${{ strategy.job-index == 0 }}
+
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
@@ -2975,7 +2972,7 @@ jobs:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ (inputs.harden_runner_egress == 'block') && 'block' || 'audit' }}
           allowed-endpoints: >
-            ${{ inputs.harden_runner_allowed_endpoints }}
+            ${{ env.CONNECTION_ALLOW_LIST }}
 
       # The plan job checks this too, but each matrix job is
       # scheduled independently: a self-hosted label shared by Linux

@@ -32,6 +32,9 @@
 # default against this repository's real configuration would lint
 # the whole tree twice on every push, since pre-commit.ci already
 # does it on the same pull request. See the job comments below.
+#
+# The ci.skip job also runs under the 'block' egress policy with the
+# organisation allow-list, the one place blocking is proven to work.
 # =============================================================================
 name: 'Linting (self) 🧹'
 
@@ -77,6 +80,10 @@ jobs:
       # The hooks pre-commit.ci is told to skip, so the ones nothing
       # else covers. One hook today: gha-workflow-linter.
       ci_skipped: true
+      # A host the workflow itself needs, missing from the organisation
+      # allow-list, then fails here rather than in a consumer that
+      # opted into blocking.
+      harden_runner_egress: 'block'
 
   linting-explicit:
     name: 'Linting (self, explicit)'

@@ -650,16 +650,27 @@ mistake, and these jobs assume a Linux shell regardless.
 
 `harden_runner_egress` defaults to `audit`, not `block`. Hook
 environments legitimately fetch from hosts specific to whichever hooks
-a repository configures, and no fixed allow-list can predict them; a
-blocking default would fail runs for sound
-repositories. Callers with a known hook set should pass `block` and
-extend `harden_runner_allowed_endpoints`.
+a repository configures, and no shared allow-list can predict them all;
+a blocking default would fail runs for sound repositories. Callers with
+a known hook set should pass `block`, adding any hosts their hooks need
+to the organisation list.
 
-The default list also carries `*.actions.githubusercontent.com` and
-`*.blob.core.windows.net`, which the executor's cache restore needs.
-That dependency belongs to the pinned action rather than to anything
-a caller configures, so leaving it out would make `block` fail every
-lint job for a reason nobody could reasonably trace.
+Both jobs load that list with
+[`harden-runner-block-action`](https://github.com/lfreleng-actions/harden-runner-block-action),
+as this repository's other reusable workflows do, pinned by
+`harden_runner_allowlist` to a commit of the organisation's `.github`
+repository. The action collapses the list into the single
+space-separated string harden-runner's agent expects, and drops any
+entry that does not resolve, which would otherwise make harden-runner
+abandon `block` while still reporting success. harden-runner allows
+the Actions service and cache hosts itself.
+
+An earlier revision passed its own newline-separated list straight to
+harden-runner. The agent splits `allowed-endpoints` on single spaces,
+so it read that list as one malformed entry, and `block` refused every
+host it did not allow implicitly: `setup-uv` failed fetching its
+manifest from `raw.githubusercontent.com`. The `ci.skip` self-test now
+runs under `block`, so a regression of either kind fails here first.
 
 ## Inputs
 
@@ -688,7 +699,7 @@ lint job for a reason nobody could reasonably trace.
 | `runs_on`                         | `string`  | `ubuntu-latest`                   | Runner label; Linux, and harden-runner must support it  |
 | `timeout_minutes`                 | `number`  | `15`                              | Timeout for each lint job                               |
 | `harden_runner_egress`            | `string`  | `audit`                           | `audit` or `block`                                      |
-| `harden_runner_allowed_endpoints` | `string`  | GitHub, PyPI/uv, Node, cache      | Allow-list applied when blocking                        |
+| `harden_runner_allowlist`         | `string`  | Organisation list, pinned         | `harden-runner-block-action` `config` coordinate        |
 
 <!-- markdownlint-enable MD013 -->
 
