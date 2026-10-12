@@ -23,6 +23,8 @@
 #   harden_runner_verdict - is harden-runner actually monitoring this
 #                         job, or did it return early and leave it
 #                         unprotected?
+#   harden_runner_await - is an agent harden-runner started still
+#                         coming up, and worth waiting for?
 #
 # The authoritative list is the extraction check below, which fails
 # if any named function goes missing -- so it stays correct as the
@@ -97,7 +99,8 @@ fi
 for fn in dangling_component org_status_verdict org_absence_verdict \
   contained_in_workspace explicit_prefix_empty single_line \
   primary_problem skip_prefilter plan_conflicts \
-  commit_range_verdict harden_runner_verdict harden_runner_gate; do
+  commit_range_verdict harden_runner_await harden_runner_verdict \
+  harden_runner_gate; do
   if ! grep -q "${fn}()" "${extracted}"; then
     echo "ERROR: no ${fn}() between the markers in" >&2
     echo "       ${workflow}" >&2
@@ -369,6 +372,71 @@ check_verdict 'macOS is not Linux' \
   'macOS' "${status_present}" '' 'github-hosted' 'not-linux'
 check_verdict 'Windows is not Linux' \
   'Windows' "${status_present}" '' 'github-hosted' 'not-linux'
+
+# --- harden_runner_await ---------------------------------------------
+
+# harden-runner's pre-step gives the agent about nine seconds, then
+# succeeds whether or not it came up. With a large allow-list the
+# agent can still be starting, so the gate must wait for it -- but
+# only where an agent is really coming, or every unsupported runner
+# pays the full wait before its verdict.
+
+config_present="${workdir}/agent.json"
+config_absent="${workdir}/no-such-agent.json"
+: > "${config_present}"
+rm -f "${config_absent}"
+
+check_await() {
+  local desc="$1" config="$2" status="$3" limit="$4" envn="$5" \
+    max="$6" expect="$7" got start elapsed
+
+  start="${SECONDS}"
+  harden_runner_await "${config}" "${status}" "${limit}" "${envn}"
+  elapsed=$((SECONDS - start))
+  got='absent'
+  if [ -f "${status}" ]; then
+    got='present'
+  fi
+  if [ "${elapsed}" -gt "${max}" ]; then
+    got="${got} after ${elapsed}s"
+  fi
+  if [ "${got}" = "${expect}" ]; then
+    report yes "${desc}" "${expect}" "${got}"
+  else
+    report no "${desc}" "${expect}" "${got}"
+  fi
+}
+
+check_await 'a running agent is not waited for' \
+  "${config_present}" "${status_present}" 30 'github-hosted' 1 \
+  'present'
+
+# ubuntu-slim, containers, ARM64: harden-runner returns before it
+# writes any configuration, so no agent is coming.
+check_await 'no agent configuration means no wait' \
+  "${config_absent}" "${status_absent}" 30 'github-hosted' 1 \
+  'absent'
+
+# A persistent runner may hold a configuration from an earlier job,
+# and its verdict is 'unmonitored' whatever the wait finds.
+check_await 'a self-hosted runner is not waited for' \
+  "${config_present}" "${status_absent}" 30 'self-hosted' 1 \
+  'absent'
+
+# The case the wait exists for: the status file lands late.
+status_late="${workdir}/late-agent.status"
+rm -f "${status_late}"
+(sleep 2 && : > "${status_late}") &
+late_writer=$!
+check_await 'a late agent is waited for' \
+  "${config_present}" "${status_late}" 30 'github-hosted' 5 \
+  'present'
+wait "${late_writer}"
+
+# An agent that never starts must not hang the job.
+check_await 'the wait is bounded' \
+  "${config_present}" "${status_absent}" 2 'github-hosted' 4 \
+  'absent'
 
 # --- harden_runner_gate ----------------------------------------------
 

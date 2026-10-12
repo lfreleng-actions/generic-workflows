@@ -385,6 +385,12 @@ jobs:
       matrix: ${{ steps.resolve.outputs.matrix }}
     steps:
       - name: 'Load harden-runner allow-list'
+        # Only 'block' uses the list, so under 'audit' a .github or
+        # DNS outage must not fail the job. A step 'if:' cannot skip
+        # the loader: its 'pre' entry has no 'pre-if', so the pre
+        # phase runs regardless. continue-on-error covers that phase
+        # too, and under 'block' a failure still stops the job.
+        continue-on-error: ${{ inputs.harden_runner_egress != 'block' }}
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
         with:
@@ -449,10 +455,11 @@ jobs:
           # Enumerating unsupported labels is a blocklist, and a
           # runner image added next year walks straight past it; the
           # agent either started or it did not. On Linux the pre-step
-          # blocks until the agent writes its status file, so by the
-          # time a later step runs the file is there or the agent
-          # never came up. A custom VM image ships the agent already
-          # running and announces itself by environment variable.
+          # polls for the agent's status file, but only for about nine
+          # seconds; harden_runner_await below covers an agent still
+          # starting after that. A custom VM image ships the agent
+          # already running and announces itself by environment
+          # variable.
           #
           # The status file is evidence ONLY on an ephemeral runner.
           # '/home/agent/agent.status' is precisely what
@@ -477,6 +484,30 @@ jobs:
           # deploy-on-self-hosted-vm is set, so there was no
           # enforcement to lose. 'audit' warns and continues;
           # 'block' stops.
+          # harden-runner's pre-step polls for the status file 30
+          # times at 300 ms, then prints 'timed out' and succeeds
+          # whether or not the agent came up. The agent resolves every
+          # allow-list entry before it writes that file, so the
+          # organisation list can outlast the window while the agent
+          # is still starting, and the verdict would then fail a
+          # runner that is about to be monitored. Wait longer, but
+          # only on a GitHub-hosted runner where harden-runner wrote
+          # the agent's configuration, which it does just before
+          # starting it: with no configuration there is no agent
+          # coming, and waiting would only delay the verdict.
+          harden_runner_await() {
+            # $1=agent config file $2=agent status file $3=seconds
+            # $4=RUNNER_ENVIRONMENT
+            local waited=0
+            if [ "$4" != 'github-hosted' ] || [ ! -f "$1" ]; then
+              return 0
+            fi
+            while [ ! -f "$2" ] && [ "$waited" -lt "$3" ]; do
+              sleep 1
+              waited=$((waited + 1))
+            done
+          }
+
           harden_runner_verdict() {
             # $1=RUNNER_OS $2=agent status file $3=custom-image flag
             # $4=RUNNER_ENVIRONMENT
@@ -567,6 +598,8 @@ jobs:
           }
           # END harden_check
 
+          harden_runner_await /home/agent/agent.json \
+            /home/agent/agent.status 60 "${RUNNER_ENVIRONMENT:-}"
           if ! harden_runner_gate \
             "$(harden_runner_verdict "$RUNNER_OS" \
               /home/agent/agent.status \
@@ -2957,6 +2990,8 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - name: 'Load harden-runner allow-list'
+        # Fatal under 'block' alone, as in the plan job.
+        continue-on-error: ${{ inputs.harden_runner_egress != 'block' }}
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
         with:
@@ -3013,10 +3048,11 @@ jobs:
           # Enumerating unsupported labels is a blocklist, and a
           # runner image added next year walks straight past it; the
           # agent either started or it did not. On Linux the pre-step
-          # blocks until the agent writes its status file, so by the
-          # time a later step runs the file is there or the agent
-          # never came up. A custom VM image ships the agent already
-          # running and announces itself by environment variable.
+          # polls for the agent's status file, but only for about nine
+          # seconds; harden_runner_await below covers an agent still
+          # starting after that. A custom VM image ships the agent
+          # already running and announces itself by environment
+          # variable.
           #
           # The status file is evidence ONLY on an ephemeral runner.
           # '/home/agent/agent.status' is precisely what
@@ -3041,6 +3077,30 @@ jobs:
           # deploy-on-self-hosted-vm is set, so there was no
           # enforcement to lose. 'audit' warns and continues;
           # 'block' stops.
+          # harden-runner's pre-step polls for the status file 30
+          # times at 300 ms, then prints 'timed out' and succeeds
+          # whether or not the agent came up. The agent resolves every
+          # allow-list entry before it writes that file, so the
+          # organisation list can outlast the window while the agent
+          # is still starting, and the verdict would then fail a
+          # runner that is about to be monitored. Wait longer, but
+          # only on a GitHub-hosted runner where harden-runner wrote
+          # the agent's configuration, which it does just before
+          # starting it: with no configuration there is no agent
+          # coming, and waiting would only delay the verdict.
+          harden_runner_await() {
+            # $1=agent config file $2=agent status file $3=seconds
+            # $4=RUNNER_ENVIRONMENT
+            local waited=0
+            if [ "$4" != 'github-hosted' ] || [ ! -f "$1" ]; then
+              return 0
+            fi
+            while [ ! -f "$2" ] && [ "$waited" -lt "$3" ]; do
+              sleep 1
+              waited=$((waited + 1))
+            done
+          }
+
           harden_runner_verdict() {
             # $1=RUNNER_OS $2=agent status file $3=custom-image flag
             # $4=RUNNER_ENVIRONMENT
@@ -3131,6 +3191,8 @@ jobs:
           }
           # END harden_check
 
+          harden_runner_await /home/agent/agent.json \
+            /home/agent/agent.status 60 "${RUNNER_ENVIRONMENT:-}"
           if ! harden_runner_gate \
             "$(harden_runner_verdict "$RUNNER_OS" \
               /home/agent/agent.status \

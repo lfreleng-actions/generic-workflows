@@ -80,9 +80,9 @@ jobs:
       # The hooks pre-commit.ci is told to skip, so the ones nothing
       # else covers. One hook today: gha-workflow-linter.
       ci_skipped: true
-      # A host the workflow itself needs, missing from the organisation
-      # allow-list, then fails here rather than in a consumer that
-      # opted into blocking.
+      # If the organisation allow-list lacks a host the workflow
+      # itself needs, this job fails, before any consumer that opted
+      # into blocking does.
       harden_runner_egress: 'block'
 
   linting-explicit:

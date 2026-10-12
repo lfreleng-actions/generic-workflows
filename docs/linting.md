@@ -663,7 +663,19 @@ repository. The action collapses the list into the single
 space-separated string harden-runner's agent expects, and drops any
 entry that does not resolve, which would otherwise make harden-runner
 abandon `block` while still reporting success. harden-runner allows
-the Actions service and cache hosts itself.
+the Actions service and cache hosts itself. The list matters under
+`block` alone, so a failure to load it stops the job there; under
+`audit` the job carries on, and an outage of the `.github` repository
+or of DNS does not fail every default call.
+
+harden-runner's pre-step gives its agent about nine seconds, then
+reports success even if the agent has not come up. The agent
+resolves every allow-list entry first, so with the organisation list
+it can still be starting when that window closes. Before reaching a
+verdict, each job waits up to 60 seconds more for the status file, on
+a GitHub-hosted runner where harden-runner wrote the agent's
+configuration and so has an agent on its way. A runner without that
+configuration has no agent coming, and gets its verdict at once.
 
 An earlier revision passed its own newline-separated list straight to
 harden-runner. The agent splits `allowed-endpoints` on single spaces,
