@@ -49,8 +49,10 @@ plan (single job)  ->  lint (matrix, one job per task)
    the matrix and a `has_work` verdict.
 2. **lint** — one job per task, in parallel. Each runs
    [`lfreleng-actions/standalone-linting-action`](https://github.com/lfreleng-actions/standalone-linting-action),
-   which installs prek at the pinned version and runs the task's hooks
-   against the task's configuration.
+   which prepares any Rust or Node.js project toolchain (see
+   [Project toolchains](#project-toolchains)), installs prek at the
+   pinned version and runs the task's hooks against the task's
+   configuration.
 
 ## Fast abort
 
@@ -583,6 +585,43 @@ seven stay on `./` until actionlint learns it. Suppressing the
 finding would hide a real improvement rather than a false positive,
 and it stands for that reason.
 
+## Project toolchains
+
+Some hooks run the project's own tools rather than an environment prek
+builds: `cargo fmt` and `cargo clippy` need the toolchain
+`rust-toolchain.toml` pins, and `eslint`, `prettier` and `tsc` need
+the project's `node_modules`. Repositories declare such hooks
+`language: system`, and typically list them under `ci.skip` because
+pre-commit.ci cannot prepare them.
+
+The executor prepares both before prek runs, in every lint job:
+
+- **Rust** (`rust_toolchain_setup`, default `auto`): with a tracked
+  `Cargo.toml` under `path_prefix`, installs the selected toolchain and
+  adds `rust_components` (default `rustfmt clippy`).
+- **Node.js** (`node_setup`, default `auto`): with a tracked
+  `package.json` under `path_prefix`, selects Node.js (`node_version`,
+  else `.nvmrc`, `.node-version` or a plain `engines.node`), then
+  installs the dependencies frozen to the tracked lockfile with the
+  package manager it belongs to: npm, Yarn, pnpm or Bun. Install
+  scripts stay off unless `node_install_scripts` is `true`. A
+  `package.json` with no lockfile gets a warning and no install under
+  `auto`.
+
+Preparation leaves repositories with neither file alone. Set either
+input to `false` to skip it, or `true` to require it.
+
+Preparation runs in **every** lint job, so its cost multiplies with
+`split_hooks` (the default): a repository whose `ci.skip` set holds
+`eslint`, `prettier` and `tsc` installs its dependencies three times.
+Set `split_hooks: false` to prepare once and run those hooks together.
+A large project may also need more than the default
+`timeout_minutes` of 15 for a cold dependency install plus `tsc`.
+
+The [executor's README](https://github.com/lfreleng-actions/standalone-linting-action#readme)
+recommends hook definitions for both languages, and explains why the
+Node.js hooks must be `language: system`.
+
 ## Runner
 
 `runs_on` defaults to `ubuntu-latest`. prek is a single static binary
@@ -708,6 +747,11 @@ runs under `block`, so a regression of either kind fails here first.
 | `branch_name`                     | `string`  | `''`                              | Checkout this branch first (for `no-commit-to-branch`)  |
 | `export_github_token`             | `boolean` | `true`                            | Export the workflow token to hooks on trusted events    |
 | `prek_version`                    | `string`  | `0.4.14`                          | prek version used to run the hooks                      |
+| `rust_toolchain_setup`            | `string`  | `auto`                            | Prepare the Rust toolchain: `auto`, `true` or `false`   |
+| `rust_components`                 | `string`  | `rustfmt clippy`                  | rustup components added to each prepared toolchain      |
+| `node_setup`                      | `string`  | `auto`                            | Prepare a Node.js project: `auto`, `true` or `false`    |
+| `node_version`                    | `string`  | `''`                              | Node.js version; empty reads the project's own pin      |
+| `node_install_scripts`            | `boolean` | `false`                           | Let installs run lifecycle scripts                      |
 | `runs_on`                         | `string`  | `ubuntu-latest`                   | Runner label; Linux, and harden-runner must support it  |
 | `timeout_minutes`                 | `number`  | `15`                              | Timeout for each lint job                               |
 | `harden_runner_egress`            | `string`  | `audit`                           | `audit` or `block`                                      |

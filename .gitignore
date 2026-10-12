@@ -58,3 +58,7 @@ MANIFEST
 
 # Node
 node_modules/*
+
+# Self-test fixture build output
+tests/fixtures/node/node_modules/
+tests/fixtures/rust/target/

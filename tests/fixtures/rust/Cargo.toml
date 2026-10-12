@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Fixture crate for the Rust toolchain self-test in linting-action.yaml.
+#
+# rust-toolchain.toml beside this file pins a toolchain the runner
+# image does not ship, with the minimal profile, so neither rustfmt
+# nor clippy comes with it. The hooks in
+# tests/resources/rust-toolchain-lint-config.yaml then pass only when
+# the executor prepared that toolchain and added the components the
+# workflow forwards.
+
+[package]
+name = "linting-toolchain-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+# A workspace of its own, so cargo never walks up looking for one.
+[workspace]

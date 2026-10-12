@@ -1,0 +1,50 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Fixture for the Rust toolchain self-test in linting-action.yaml.
+#
+# Two 'language: system' hooks against tests/fixtures/rust, listed
+# under ci.skip the way a real Rust repository lists them, since
+# pre-commit.ci cannot prepare a toolchain. The self-test selects
+# them with ci_skipped and leaves every toolchain input at its
+# default, so it proves what a consumer gets without configuring
+# anything.
+#
+# The crate pins a toolchain the runner image lacks, with the minimal
+# profile, and RUSTUP_AUTO_INSTALL=0 stops rustup fetching it on
+# demand. So each hook passes only if the executor installed that
+# toolchain and added rustfmt and clippy to it -- that is, only if
+# the workflow forwarded rust_toolchain_setup and rust_components.
+#
+# prek runs hooks from the git top level, hence the 'cd': rustup
+# selects the toolchain from the working directory, not from
+# --manifest-path.
+#
+# Deliberately NOT named .pre-commit-config.yaml, so prek's workspace
+# discovery leaves it alone.
+
+ci:
+  skip: [cargo-fmt, cargo-clippy]
+
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: 'cargo fmt (pinned fixture toolchain)'
+        entry: >-
+          bash -c 'cd tests/fixtures/rust &&
+          RUSTUP_AUTO_INSTALL=0 cargo fmt --all --check'
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: cargo-clippy
+        name: 'cargo clippy (pinned fixture toolchain)'
+        entry: >-
+          bash -c 'cd tests/fixtures/rust &&
+          RUSTUP_AUTO_INSTALL=0 cargo clippy --locked --all-targets
+          -- -D warnings'
+        language: system
+        pass_filenames: false
+        always_run: true

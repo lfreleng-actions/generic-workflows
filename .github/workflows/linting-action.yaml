@@ -25,13 +25,15 @@
 # resolves to the NAME, so an unmarked caller here would collide with
 # an organisation-injected workflow of the same name.
 #
-# Three jobs, each exercising ONE selection mode. Two name hooks
-# explicitly and take the configuration through primary discovery;
-# the third names a small fixture configuration and runs every hook
-# in it, which is the run-all task shape. Adopting the no-input
-# default against this repository's real configuration would lint
-# the whole tree twice on every push, since pre-commit.ci already
-# does it on the same pull request. See the job comments below.
+# Five jobs. The first three each exercise ONE selection mode: two
+# name hooks explicitly and take the configuration through primary
+# discovery; the third names a small fixture configuration and runs
+# every hook in it, which is the run-all task shape. The last two run
+# fixture projects through the project-toolchain preparation, one for
+# Rust and one for Node.js. Adopting the no-input default against
+# this repository's real configuration would lint the whole tree
+# twice on every push, since pre-commit.ci already does it on the
+# same pull request. See the job comments below.
 #
 # The ci.skip job also runs under the 'block' egress policy with the
 # organisation allow-list, the one place blocking is proven to work.
@@ -127,3 +129,40 @@ jobs:
       # only while the forwarding works -- drop it and the excluded
       # hook runs.
       skip_hooks: 'run-all-must-be-skipped'
+
+  # The project-toolchain path, end to end, once per language. Each
+  # points path_prefix at a fixture project and runs its fixture
+  # configuration's ci.skip set -- the shape a real Rust or Node.js
+  # repository uses, since pre-commit.ci cannot prepare either -- with
+  # every toolchain input left at its default.
+  #
+  # The hooks pass only when preparation happened: the Rust crate
+  # pins a toolchain the runner lacks, with no rustfmt or clippy, and
+  # the Node.js hook refuses to download prettier. So a regression
+  # that dropped or miswired the forwarded inputs fails these jobs
+  # rather than letting the hooks find a toolchain by accident.
+  #
+  # A side effect worth knowing: the executor finds a Rust project by
+  # a tracked Cargo.toml anywhere under path_prefix, so the three jobs
+  # above (prefix '.') now also prepare the runner's default stable
+  # toolchain. That toolchain and its components are preinstalled, so
+  # the cost is a rustup check rather than a download.
+  linting-rust-toolchain:
+    name: 'Linting (self, Rust toolchain)'
+    permissions:
+      contents: read
+    uses: $/.github/workflows/linting.yaml
+    with:
+      ci_skipped: true
+      config_path: 'tests/resources/rust-toolchain-lint-config.yaml'
+      path_prefix: 'tests/fixtures/rust'
+
+  linting-node-toolchain:
+    name: 'Linting (self, Node.js toolchain)'
+    permissions:
+      contents: read
+    uses: $/.github/workflows/linting.yaml
+    with:
+      ci_skipped: true
+      config_path: 'tests/resources/node-toolchain-lint-config.yaml'
+      path_prefix: 'tests/fixtures/node'

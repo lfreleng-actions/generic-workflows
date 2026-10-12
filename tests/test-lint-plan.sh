@@ -1639,6 +1639,92 @@ accept 'an explicitly empty repos list still plans' \
   GITHUB_WORKSPACE="${empty_repos_dir}" \
   PRIMARY='.pre-commit-config.yaml'
 
+# --- Toolchain inputs reach the executor -----------------------------
+#
+# The self-test jobs leave every toolchain input at its default, and
+# the executor declares the same defaults, so deleting a forwarding
+# line from the executor step's 'with:' would leave them green. These
+# cases pin the wiring itself: each input is declared with the
+# executor's default, forwarded verbatim to the executor, and (bar the
+# boolean) handed to the plan job's validation.
+
+toolchain_wiring() {
+  # $1=input name; prints 'ok' or the first problem found
+  "${PY_RUN[@]}" - "${workflow}" "$1" <<'PYEOF'
+import sys
+
+import yaml
+
+path, name = sys.argv[1], sys.argv[2]
+expected = {
+    'rust_toolchain_setup': ('string', 'auto'),
+    'rust_components': ('string', 'rustfmt clippy'),
+    'node_setup': ('string', 'auto'),
+    'node_version': ('string', ''),
+    'node_install_scripts': ('boolean', False),
+}
+with open(path, encoding='utf-8') as handle:
+    doc = yaml.safe_load(handle)
+# PyYAML reads the bare 'on' key as boolean True.
+trigger = doc.get('on', doc.get(True))
+declared = trigger['workflow_call']['inputs'].get(name)
+want_type, want_default = expected[name]
+if declared is None:
+    print('not declared as a workflow_call input')
+    sys.exit()
+if declared.get('type') != want_type:
+    print(f"type {declared.get('type')!r}, expected {want_type!r}")
+    sys.exit()
+if declared.get('default') != want_default:
+    print(f"default {declared.get('default')!r},"
+          f" expected {want_default!r}")
+    sys.exit()
+
+steps = [
+    step
+    for job in doc['jobs'].values()
+    for step in job.get('steps', [])
+    if str(step.get('uses', '')).startswith(
+        'lfreleng-actions/standalone-linting-action@')
+]
+if len(steps) != 1:
+    print(f'{len(steps)} executor steps, expected 1')
+    sys.exit()
+forward = {
+    'node_install_scripts':
+        "${{ inputs.node_install_scripts && 'true' || 'false' }}",
+}.get(name, '${{ inputs.%s }}' % name)
+got = steps[0].get('with', {}).get(name)
+if got != forward:
+    print(f'executor receives {got!r}, expected {forward!r}')
+    sys.exit()
+
+if want_type == 'string':
+    validate = [
+        step
+        for step in doc['jobs']['plan']['steps']
+        if step.get('name') == 'Guard trigger and validate inputs'
+    ]
+    env = validate[0].get('env', {}) if validate else {}
+    key = 'INPUT_' + name.upper()
+    if env.get(key) != '${{ inputs.%s }}' % name:
+        print(f'plan validation env {key} is {env.get(key)!r}')
+        sys.exit()
+print('ok')
+PYEOF
+}
+
+for input in rust_toolchain_setup rust_components node_setup \
+  node_version node_install_scripts; do
+  got="$(toolchain_wiring "${input}")"
+  if [ "${got}" = 'ok' ]; then
+    passed=$((passed + 1))
+  else
+    failed=$((failed + 1))
+    printf 'FAIL: %s wiring: %s\n' "${input}" "${got}" >&2
+  fi
+done
+
 # --- Result ----------------------------------------------------------
 
 printf '\n%s passed, %s failed\n' "${passed}" "${failed}"
