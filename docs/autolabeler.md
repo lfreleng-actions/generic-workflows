@@ -122,7 +122,7 @@ the `pull_request_target` line:
 | `runs_on`                 | `string` | `ubuntu-latest`       | Runner label; Linux, because harden-runner needs it |
 | `timeout_minutes`         | `number` | `3`                   | Job timeout                                         |
 | `harden_runner_egress`    | `string` | `block`               | Egress policy: `block` or `audit`                   |
-| `harden_runner_allowlist` | `string` | `.github` v0.16.0     | Out-of-band allow-list coordinate                   |
+| `harden_runner_allowlist` | `string` | `.github` v0.17.1     | Out-of-band allow-list coordinate                   |
 
 <!-- markdownlint-enable MD013 -->
 
