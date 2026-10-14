@@ -335,36 +335,18 @@ on:
         description: >-
           Harden-runner egress policy: 'audit' or 'block'. Defaults
           to 'audit' because hook environments legitimately download
-          from hook-specific hosts the allow-list below cannot
-          predict. Callers with a known hook set should pass 'block'
-          and extend harden_runner_allowed_endpoints.
+          from hook-specific hosts the organisation allow-list may not
+          carry. Callers with a known hook set should pass 'block',
+          adding any hosts their hooks need to that list.
         required: false
         type: string
         default: 'audit'
-      harden_runner_allowed_endpoints:
-        description: >-
-          Newline-separated host:port allow-list applied when
-          harden_runner_egress is 'block'. The default covers GitHub,
-          PyPI/uv and the Node.js toolchain hosts prek uses, plus the
-          Actions cache service the pinned executor restores from -- a
-          dependency internal to this workflow, which a caller cannot
-          reasonably be expected to discover.
+      harden_runner_allowlist:
+        description: 'Out-of-band harden-runner allow-list configuration'
         required: false
         type: string
-        default: |
-          api.github.com:443
-          codeload.github.com:443
-          github.com:443
-          objects.githubusercontent.com:443
-          raw.githubusercontent.com:443
-          release-assets.githubusercontent.com:443
-          astral.sh:443
-          pypi.org:443
-          files.pythonhosted.org:443
-          registry.npmjs.org:443
-          nodejs.org:443
-          *.actions.githubusercontent.com:443
-          *.blob.core.windows.net:443
+        # yamllint disable-line rule:line-length
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@56d70f0eae78f334a598d1ffe071d4b821517b22'  # v0.17.1
 
     outputs:
       # 'true'/'false' from a fixed vocabulary; safe to use in a
@@ -402,6 +384,18 @@ jobs:
           || steps.locate.outputs.has_work }}
       matrix: ${{ steps.resolve.outputs.matrix }}
     steps:
+      - name: 'Load harden-runner allow-list'
+        # Only 'block' uses the list, so under 'audit' a .github or
+        # DNS outage must not fail the job. A step 'if:' cannot skip
+        # the loader: its 'pre' entry has no 'pre-if', so the pre
+        # phase runs regardless. continue-on-error covers that phase
+        # too, and under 'block' a failure still stops the job.
+        continue-on-error: ${{ inputs.harden_runner_egress != 'block' }}
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
@@ -409,7 +403,7 @@ jobs:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ (inputs.harden_runner_egress == 'block') && 'block' || 'audit' }}
           allowed-endpoints: >
-            ${{ inputs.harden_runner_allowed_endpoints }}
+            ${{ env.CONNECTION_ALLOW_LIST }}
 
       - name: 'Guard trigger and validate inputs'
         env:
@@ -461,10 +455,11 @@ jobs:
           # Enumerating unsupported labels is a blocklist, and a
           # runner image added next year walks straight past it; the
           # agent either started or it did not. On Linux the pre-step
-          # blocks until the agent writes its status file, so by the
-          # time a later step runs the file is there or the agent
-          # never came up. A custom VM image ships the agent already
-          # running and announces itself by environment variable.
+          # polls for the agent's status file, but only for about nine
+          # seconds; harden_runner_await below covers an agent still
+          # starting after that. A custom VM image ships the agent
+          # already running and announces itself by environment
+          # variable.
           #
           # The status file is evidence ONLY on an ephemeral runner.
           # '/home/agent/agent.status' is precisely what
@@ -489,6 +484,30 @@ jobs:
           # deploy-on-self-hosted-vm is set, so there was no
           # enforcement to lose. 'audit' warns and continues;
           # 'block' stops.
+          # harden-runner's pre-step polls for the status file 30
+          # times at 300 ms, then prints 'timed out' and succeeds
+          # whether or not the agent came up. The agent resolves every
+          # allow-list entry before it writes that file, so the
+          # organisation list can outlast the window while the agent
+          # is still starting, and the verdict would then fail a
+          # runner that is about to be monitored. Wait longer, but
+          # only on a GitHub-hosted runner where harden-runner wrote
+          # the agent's configuration, which it does just before
+          # starting it: with no configuration there is no agent
+          # coming, and waiting would only delay the verdict.
+          harden_runner_await() {
+            # $1=agent config file $2=agent status file $3=seconds
+            # $4=RUNNER_ENVIRONMENT
+            local waited=0
+            if [ "$4" != 'github-hosted' ] || [ ! -f "$1" ]; then
+              return 0
+            fi
+            while [ ! -f "$2" ] && [ "$waited" -lt "$3" ]; do
+              sleep 1
+              waited=$((waited + 1))
+            done
+          }
+
           harden_runner_verdict() {
             # $1=RUNNER_OS $2=agent status file $3=custom-image flag
             # $4=RUNNER_ENVIRONMENT
@@ -579,6 +598,8 @@ jobs:
           }
           # END harden_check
 
+          harden_runner_await /home/agent/agent.json \
+            /home/agent/agent.status 60 "${RUNNER_ENVIRONMENT:-}"
           if ! harden_runner_gate \
             "$(harden_runner_verdict "$RUNNER_OS" \
               /home/agent/agent.status \
@@ -812,8 +833,8 @@ jobs:
           # selects the policy. That expression has to fall back to
           # something, and 'audit' is this workflow's documented
           # default, so a typo such as 'blok' would quietly weaken a
-          # caller who asked to block. Nothing but the harden-runner
-          # step itself runs before this check, so failing here still
+          # caller who asked to block. Nothing but the two hardening
+          # steps runs before this check, so failing here still
           # precedes every hook.
           case "$INPUT_HARDEN_RUNNER_EGRESS" in
             audit|block) ;;
@@ -2968,6 +2989,17 @@ jobs:
       fail-fast: ${{ inputs.fail_fast }}
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
+      - name: 'Load harden-runner allow-list'
+        # Fatal under 'block' alone, as in the plan job.
+        continue-on-error: ${{ inputs.harden_runner_egress != 'block' }}
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+          # The plan job's summary already shows the list; repeat it
+          # on one matrix leg, not every one.
+          allow_list_summary: ${{ strategy.job-index == 0 }}
+
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
@@ -2975,7 +3007,7 @@ jobs:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ (inputs.harden_runner_egress == 'block') && 'block' || 'audit' }}
           allowed-endpoints: >
-            ${{ inputs.harden_runner_allowed_endpoints }}
+            ${{ env.CONNECTION_ALLOW_LIST }}
 
       # The plan job checks this too, but each matrix job is
       # scheduled independently: a self-hosted label shared by Linux
@@ -3016,10 +3048,11 @@ jobs:
           # Enumerating unsupported labels is a blocklist, and a
           # runner image added next year walks straight past it; the
           # agent either started or it did not. On Linux the pre-step
-          # blocks until the agent writes its status file, so by the
-          # time a later step runs the file is there or the agent
-          # never came up. A custom VM image ships the agent already
-          # running and announces itself by environment variable.
+          # polls for the agent's status file, but only for about nine
+          # seconds; harden_runner_await below covers an agent still
+          # starting after that. A custom VM image ships the agent
+          # already running and announces itself by environment
+          # variable.
           #
           # The status file is evidence ONLY on an ephemeral runner.
           # '/home/agent/agent.status' is precisely what
@@ -3044,6 +3077,30 @@ jobs:
           # deploy-on-self-hosted-vm is set, so there was no
           # enforcement to lose. 'audit' warns and continues;
           # 'block' stops.
+          # harden-runner's pre-step polls for the status file 30
+          # times at 300 ms, then prints 'timed out' and succeeds
+          # whether or not the agent came up. The agent resolves every
+          # allow-list entry before it writes that file, so the
+          # organisation list can outlast the window while the agent
+          # is still starting, and the verdict would then fail a
+          # runner that is about to be monitored. Wait longer, but
+          # only on a GitHub-hosted runner where harden-runner wrote
+          # the agent's configuration, which it does just before
+          # starting it: with no configuration there is no agent
+          # coming, and waiting would only delay the verdict.
+          harden_runner_await() {
+            # $1=agent config file $2=agent status file $3=seconds
+            # $4=RUNNER_ENVIRONMENT
+            local waited=0
+            if [ "$4" != 'github-hosted' ] || [ ! -f "$1" ]; then
+              return 0
+            fi
+            while [ ! -f "$2" ] && [ "$waited" -lt "$3" ]; do
+              sleep 1
+              waited=$((waited + 1))
+            done
+          }
+
           harden_runner_verdict() {
             # $1=RUNNER_OS $2=agent status file $3=custom-image flag
             # $4=RUNNER_ENVIRONMENT
@@ -3134,6 +3191,8 @@ jobs:
           }
           # END harden_check
 
+          harden_runner_await /home/agent/agent.json \
+            /home/agent/agent.status 60 "${RUNNER_ENVIRONMENT:-}"
           if ! harden_runner_gate \
             "$(harden_runner_verdict "$RUNNER_OS" \
               /home/agent/agent.status \
