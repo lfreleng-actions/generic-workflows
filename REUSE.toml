@@ -1,0 +1,14 @@
+version = 1
+
+# Self-test fixture files whose formats carry no comments, so they
+# cannot hold an SPDX header of their own.
+[[annotations]]
+path = [
+  "tests/fixtures/node/.nvmrc",
+  "tests/fixtures/node/package.json",
+  "tests/fixtures/node/package-lock.json",
+  "tests/fixtures/rust/Cargo.lock",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 The Linux Foundation"
+SPDX-License-Identifier = "Apache-2.0"

@@ -100,7 +100,8 @@ for fn in dangling_component org_status_verdict org_absence_verdict \
   contained_in_workspace explicit_prefix_empty single_line \
   primary_problem skip_prefilter plan_conflicts \
   commit_range_verdict harden_runner_await harden_runner_verdict \
-  harden_runner_gate; do
+  harden_runner_gate setup_mode_verdict rust_components_verdict \
+  node_version_verdict; do
   if ! grep -q "${fn}()" "${extracted}"; then
     echo "ERROR: no ${fn}() between the markers in" >&2
     echo "       ${workflow}" >&2
@@ -666,6 +667,73 @@ check_range 'a dollar' 'a..$(id)' 'bad-revision'
 check_range 'a newline' "$(printf 'a..b\nevil')" 'control-characters'
 check_range 'a carriage return' "$(printf 'a..b\r')" 'control-characters'
 check_range 'a tab' "$(printf 'a..b\tx')" 'control-characters'
+
+# --- Project toolchain inputs -----------------------------------------
+#
+# Forwarded to the executor, which holds them to these same rules;
+# the plan job checks them first so a bad value fails once rather
+# than in every lint job. Component names and Node.js versions reach
+# command lines, so both sides of each rule matter: the accepted
+# forms must stay accepted, and the hostile ones refused.
+
+check_verdict() {
+  local fn="$1" desc="$2" value="$3" expect="$4" got
+
+  got="$("${fn}" "${value}")"
+  if [ "${got}" = "${expect}" ]; then
+    report yes "${fn}: ${desc}" "${expect}" "${got}"
+  else
+    report no "${fn}: ${desc}" "${expect}" "${got}"
+  fi
+}
+
+# rust_toolchain_setup and node_setup: the literal strings alone.
+for mode in auto true false; do
+  check_verdict setup_mode_verdict "'${mode}'" "${mode}" 'ok'
+done
+check_verdict setup_mode_verdict 'upper case' 'TRUE' 'bad-mode'
+check_verdict setup_mode_verdict 'a synonym' 'yes' 'bad-mode'
+check_verdict setup_mode_verdict 'empty' '' 'bad-mode'
+check_verdict setup_mode_verdict 'trailing space' 'auto ' 'bad-mode'
+check_verdict setup_mode_verdict 'a newline' "$(printf 'auto\nx')" \
+  'bad-mode'
+
+# rust_components: the default, both separators, and empty.
+check_verdict rust_components_verdict 'the default' 'rustfmt clippy' 'ok'
+check_verdict rust_components_verdict 'comma separated' \
+  'rustfmt,clippy,rust-src' 'ok'
+check_verdict rust_components_verdict 'an underscore' 'llvm_tools' 'ok'
+check_verdict rust_components_verdict 'empty' '' 'ok'
+check_verdict rust_components_verdict 'option-shaped' '-clippy' \
+  'bad-component'
+check_verdict rust_components_verdict 'a semicolon' 'rustfmt;id' \
+  'bad-component'
+# shellcheck disable=SC2016  # a literal '$', not an expansion
+check_verdict rust_components_verdict 'a substitution' '$(id)' \
+  'bad-component'
+check_verdict rust_components_verdict 'a path' '../clippy' \
+  'bad-component'
+check_verdict rust_components_verdict 'longer than 64' \
+  "$(printf 'a%.0s' {1..65})" 'bad-component'
+check_verdict rust_components_verdict 'a newline' \
+  "$(printf 'rustfmt\nclippy')" 'control-characters'
+check_verdict rust_components_verdict 'a tab' \
+  "$(printf 'rustfmt\tclippy')" 'control-characters'
+
+# node_version: every form the executor documents, and empty.
+for version in '' 22 v22 22.11 22.11.0 22.x 22.11.x 'lts/*' lts/jod \
+  node latest current; do
+  check_verdict node_version_verdict "'${version}'" "${version}" 'ok'
+done
+check_verdict node_version_verdict 'a range' '>=18' 'bad-version'
+check_verdict node_version_verdict 'a caret range' '^22' 'bad-version'
+check_verdict node_version_verdict 'a command' '22 && id' 'bad-version'
+check_verdict node_version_verdict 'an LTS path' 'lts/../x' 'bad-version'
+check_verdict node_version_verdict 'five digits' '12345' 'bad-version'
+check_verdict node_version_verdict 'a newline' "$(printf '22\nx')" \
+  'control-characters'
+check_verdict node_version_verdict 'a carriage return' \
+  "$(printf '22\r')" 'control-characters'
 
 # --- primary_problem --------------------------------------------------
 #

@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Deliberately NOT the runner's default stable toolchain: the
+# self-test proves the executor installs what a project pins.
+# Minimal profile, so rustfmt and clippy arrive only through the
+# rust_components input the workflow forwards.
+[toolchain]
+channel = "1.90.0"
+profile = "minimal"

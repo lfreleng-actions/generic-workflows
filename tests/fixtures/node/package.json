@@ -1,0 +1,10 @@
+{
+  "name": "linting-toolchain-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Fixture for the linting workflow's Node.js toolchain self-test",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "prettier": "3.9.10"
+  }
+}

@@ -311,6 +311,61 @@ on:
         type: string
         default: '0.4.14'
 
+      # --- Project toolchains ---
+      # Forwarded to every lint job's executor, which prepares the
+      # project's own toolchain before prek runs so 'language: system'
+      # hooks (cargo fmt/clippy, eslint, prettier, tsc) find it. The
+      # names, defaults and accepted values match the executor's
+      # inputs; the plan job validates them so a typo fails once,
+      # before any hook, rather than once per lint job.
+      rust_toolchain_setup:
+        description: >-
+          Prepare the Rust toolchain before the hooks run: 'auto' when
+          path_prefix holds a tracked Cargo.toml, 'true' for any
+          project, 'false' never. Preparation installs the toolchain
+          rust-toolchain.toml selects (else the rustup default) and
+          adds rust_components to it.
+        required: false
+        type: string
+        default: 'auto'
+      rust_components:
+        description: >-
+          Space or comma separated rustup components to add to each
+          prepared toolchain; entries match [A-Za-z0-9][A-Za-z0-9_-]*,
+          up to 64 characters. Empty adds none.
+        required: false
+        type: string
+        default: 'rustfmt clippy'
+      node_setup:
+        description: >-
+          Prepare a Node.js project before the hooks run: 'auto' when
+          path_prefix holds a tracked package.json, 'true' for any
+          project, 'false' never. Preparation selects Node.js (see
+          node_version) and installs the dependencies frozen to the
+          tracked lockfile, with the package manager it belongs to
+          (npm, Yarn, pnpm or Bun).
+        required: false
+        type: string
+        default: 'auto'
+      node_version:
+        description: >-
+          Node.js version for project preparation: 22, 22.11.0, 22.x,
+          lts/*, lts/<codename>, node, latest or current. Empty takes
+          it from path_prefix: .nvmrc, else .node-version, else a
+          plain engines.node; with none, the runner's Node.js runs.
+        required: false
+        type: string
+        default: ''
+      node_install_scripts:
+        description: >-
+          Let the package manager run install scripts, the project's
+          and its dependencies'. The default installs with them off,
+          so preparing the project runs no code from its dependency
+          tree.
+        required: false
+        type: boolean
+        default: false
+
       # --- Runner selection and timeout ---
       runs_on:
         description: >-
@@ -419,6 +474,10 @@ jobs:
           INPUT_BRANCH_NAME: ${{ inputs.branch_name }}
           INPUT_COMMIT_RANGE: ${{ inputs.commit_range }}
           INPUT_PREK_VERSION: ${{ inputs.prek_version }}
+          INPUT_RUST_TOOLCHAIN_SETUP: ${{ inputs.rust_toolchain_setup }}
+          INPUT_RUST_COMPONENTS: ${{ inputs.rust_components }}
+          INPUT_NODE_SETUP: ${{ inputs.node_setup }}
+          INPUT_NODE_VERSION: ${{ inputs.node_version }}
           INPUT_HARDEN_RUNNER_EGRESS: ${{ inputs.harden_runner_egress }}
           # The same shapes the token export trusts, so one idea
           # has one definition. A push, a schedule or a manual
@@ -750,6 +809,68 @@ jobs:
             done
             printf 'ok'
           }
+          # The project toolchain inputs, held to the executor's own
+          # rules so a bad value fails here, once, before any hook
+          # runs, rather than once per lint job.
+          #
+          # 'auto', 'true' or 'false', exactly: the executor compares
+          # the literal strings, so 'TRUE' or 'yes' would be refused
+          # there in every lint job.
+          setup_mode_verdict() {
+            # $1=value
+            case "$1" in
+              auto|true|false) printf 'ok' ;;
+              *) printf 'bad-mode' ;;
+            esac
+          }
+          # Space or comma separated rustup component names. Each
+          # reaches a rustup command line, so it must start
+          # alphanumeric (a leading '-' reads as an option) and hold
+          # nothing a shell or rustup would interpret. Empty is valid:
+          # it prepares a toolchain without adding components.
+          rust_components_verdict() {
+            # $1=value
+            if [[ "$1" == *[$'\n\r\t\v\f']* ]]; then
+              printf 'control-characters'
+              return
+            fi
+            local component
+            local -a components
+            read -ra components <<< "${1//,/ }"
+            # Guarded: bash before 4.4 treats an empty array as unset
+            # under 'set -u', and an empty value is valid.
+            for component in ${components[@]+"${components[@]}"}; do
+              if ! [[ "$component" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]]
+              then
+                printf 'bad-component'
+                return
+              fi
+            done
+            printf 'ok'
+          }
+          # The version forms actions/setup-node takes that the
+          # executor accepts: a major, major.minor or major.minor.patch
+          # (optionally 'v'-prefixed), an 'x' wildcard, an LTS alias, or
+          # node/latest/current. A semver range is refused: setup-node
+          # would resolve it, but the value also reaches the job summary
+          # and the executor holds it to this grammar. Empty is valid:
+          # the executor reads the project's own pin.
+          node_version_verdict() {
+            # $1=value
+            if [[ "$1" == *[$'\n\r\t\v\f']* ]]; then
+              printf 'control-characters'
+              return
+            fi
+            [ -z "$1" ] && { printf 'ok'; return; }
+            local rule
+            rule='^(v?[0-9]{1,4}((\.[0-9]{1,6}){0,2}|(\.[0-9]{1,6})?\.x)'
+            rule="$rule|lts/(\*|[A-Za-z]{1,32})|node|latest|current)\$"
+            if [[ "$1" =~ $rule ]]; then
+              printf 'ok'
+            else
+              printf 'bad-version'
+            fi
+          }
           # END input_rules
 
           if [ -n "$INPUT_COMMIT_RANGE" ]; then
@@ -853,6 +974,36 @@ jobs:
             grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
             err 'prek_version must be a bare X.Y.Z version'
           fi
+          # The toolchain inputs; the rules live in the input_rules
+          # region above, where the fixtures reach them.
+          if [ "$(setup_mode_verdict "$INPUT_RUST_TOOLCHAIN_SETUP")" != ok ]
+          then
+            err "rust_toolchain_setup must be 'auto', 'true' or 'false'"
+          fi
+          if [ "$(setup_mode_verdict "$INPUT_NODE_SETUP")" != ok ]; then
+            err "node_setup must be 'auto', 'true' or 'false'"
+          fi
+          case "$(rust_components_verdict "$INPUT_RUST_COMPONENTS")" in
+            ok) ;;
+            control-characters)
+              err 'rust_components must not contain control characters'
+              ;;
+            *)
+              component_rule='[A-Za-z0-9][A-Za-z0-9_-]*, up to 64 characters'
+              err "rust_components entries must match $component_rule"
+              ;;
+          esac
+          case "$(node_version_verdict "$INPUT_NODE_VERSION")" in
+            ok) ;;
+            control-characters)
+              err 'node_version must not contain control characters'
+              ;;
+            *)
+              node_forms='22, 22.11.0 or 22.x, or lts/*, lts/<codename>,'
+              node_forms="$node_forms node, latest or current"
+              err "node_version must be a version such as $node_forms"
+              ;;
+          esac
           if [ "${#INPUT_PLAN}" -gt 65536 ]; then
             err 'plan exceeds 64 KiB'
           fi
@@ -3237,11 +3388,15 @@ jobs:
           echo 'Organisation configuration checksum verified ✅'
 
       - name: 'Run linting'
-        # Pinned to the COMMIT the v0.6.0 annotated tag points at, not
+        # Pinned to the COMMIT the v0.8.0 annotated tag points at, not
         # the tag object's own SHA, which 'uses:' cannot resolve.
         #
         # The releases this workflow depends on, newest first:
         #
+        #   v0.8.0  node_setup: prepares a Node.js project (Node.js,
+        #           then a frozen install) for system hooks
+        #   v0.7.0  rust_toolchain_setup: prepares the pinned Rust
+        #           toolchain for system cargo hooks
         #   v0.6.0  commit_range, so commit-msg hooks reach CI
         #   v0.5.0  refuses a hook no run can reach; runs a selection
         #           in one invocation; guards prek_version and
@@ -3256,7 +3411,7 @@ jobs:
         # and names the stage. So a green check from this workflow no
         # longer depends on whether an exclusion happened to be set.
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/standalone-linting-action@8485e9964141710c75d168ac03ea2d4c98e579c1  # v0.6.0
+        uses: lfreleng-actions/standalone-linting-action@c63239ab493b3ddb506524143c34a723880d3e3c  # v0.8.0
         with:
           hooks: ${{ matrix.hooks }}
           # Forwarded to EVERY task, so an exclusion is a policy for
@@ -3280,6 +3435,12 @@ jobs:
           path_prefix: ${{ inputs.path_prefix }}
           branch_name: ${{ inputs.branch_name }}
           prek_version: ${{ inputs.prek_version }}
+          rust_toolchain_setup: ${{ inputs.rust_toolchain_setup }}
+          rust_components: ${{ inputs.rust_components }}
+          node_setup: ${{ inputs.node_setup }}
+          node_version: ${{ inputs.node_version }}
+          # yamllint disable-line rule:line-length
+          node_install_scripts: ${{ inputs.node_install_scripts && 'true' || 'false' }}
           # Export the token ONLY for explicitly trusted event
           # shapes. An allow-list, not a blocklist.
           #

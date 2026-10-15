@@ -1,0 +1,38 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Fixture for the Node.js toolchain self-test in linting-action.yaml.
+#
+# A 'language: system' hook against tests/fixtures/node, listed under
+# ci.skip the way a real Node.js repository lists its eslint,
+# prettier and tsc hooks, since pre-commit.ci cannot install a
+# project's node_modules. The self-test selects it with ci_skipped
+# and leaves every toolchain input at its default.
+#
+# 'npx --no-install' refuses to download, so the hook passes only if
+# the executor installed the fixture's lockfile-pinned prettier --
+# that is, only if the workflow forwarded node_setup.
+#
+# prek runs hooks from the git top level, so the hook names the
+# fixture directory itself, as the executor's README shows for a
+# project in a subdirectory.
+#
+# Deliberately NOT named .pre-commit-config.yaml, so prek's workspace
+# discovery leaves it alone.
+
+ci:
+  skip: [prettier]
+
+repos:
+  - repo: local
+    hooks:
+      - id: prettier
+        name: 'prettier --check (fixture node_modules)'
+        entry: >-
+          npx --prefix tests/fixtures/node --no-install prettier
+          --check tests/fixtures/node/index.js
+          tests/fixtures/node/package.json
+        language: system
+        pass_filenames: false
+        always_run: true
