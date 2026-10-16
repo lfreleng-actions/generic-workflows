@@ -51,8 +51,10 @@
 #   * Local paths are confined to the repository workspace; '..',
 #     absolute paths and symlink escapes are rejected.
 #   * Remote configurations must be HTTPS; the plan job downloads and
-#     hashes them, and every lint job verifies the same digest, so
-#     the content cannot change between planning and linting.
+#     hashes them and hands the bytes to the lint jobs as a run
+#     artifact, which each verifies against the same digest. The URL
+#     never leaves the plan job, and the content cannot change
+#     between planning and linting.
 #   * The organisation fallback pins the configuration by git blob
 #     SHA and verifies its digest after the fetch.
 #
@@ -438,6 +440,9 @@ jobs:
         ${{ steps.resolve.outputs.has_work
           || steps.locate.outputs.has_work }}
       matrix: ${{ steps.resolve.outputs.matrix }}
+      # Plan-job only, deliberately not a workflow_call output: the
+      # lint jobs need it, callers do not.
+      config_artifact_id: ${{ steps.handover.outputs.artifact-id }}
     steps:
       - name: 'Load harden-runner allow-list'
         # Only 'block' uses the list, so under 'audit' a .github or
@@ -1766,6 +1771,7 @@ jobs:
           import time
           import urllib.parse
           import urllib.request
+          import uuid
 
           import yaml
 
@@ -1828,10 +1834,11 @@ jobs:
           # supposed -- and a pre-commit configuration approaching a
           # megabyte of YAML is a problem of its own.
           MAX_CONFIG_BYTES = 1048576
-          # Matches the executor's 'curl --max-time 60', which is a
-          # TOTAL deadline. The planner must refuse what the executor
-          # cannot fetch, or a plan resolves cleanly and then fails in
-          # every lint job.
+          # A TOTAL deadline for one fetch. The plan job is the only
+          # fetcher -- the lint jobs receive the bytes as an artifact
+          # -- so this bounds how long one slow host can hold the
+          # plan, and fails it with a diagnosis rather than leaving
+          # the job to time out.
           DOWNLOAD_TIMEOUT = 60
           # Deliberately below DOWNLOAD_TIMEOUT: this bounds one
           # blocking socket operation, so keeping it smaller caps how
@@ -1889,11 +1896,9 @@ jobs:
               it had. Rejecting in redirect_request stops the chain
               before the next request opens.
 
-              max_redirections matches the executor's
-              'curl --max-redirs 3'. urllib defaults to 10, so a URL
-              with four to ten hops planned cleanly and then failed in
-              every lint job -- the planner must refuse what the
-              executor cannot fetch.
+              max_redirections bounds the chain at 3, as curl's
+              '--max-redirs 3' does for the organisation fallback
+              fetch in the locate step. urllib defaults to 10.
               """
 
               max_redirections = 3
@@ -2386,7 +2391,7 @@ jobs:
               #   'user:s3cret@example.org'
               #
               # So such a URL could never have worked at plan time,
-              # whatever the executor's curl makes of it. Accepting
+              # and the plan job is the only fetcher. Accepting
               # one and failing mid-download would report a broken
               # configuration as a planning error; refusing it here
               # says which part is wrong, once. A presigned query
@@ -2517,11 +2522,23 @@ jobs:
               return data, digest
 
 
-          def stage_url_config(url, expect_sha, tag, label):
+          def stage_url_config(url, expect_sha, label):
+              """Fetch a URL configuration into the hand-over directory.
+
+              The lint jobs never see the URL: a presigned one carries
+              its signature in the query, and anything they receive
+              travels through the 'matrix' output that every reader
+              of the run can see. They receive these bytes instead,
+              uploaded as a run artifact, and find the file from
+              matrix.sha256 alone. Content-addressing needs no index,
+              and two entries with identical bytes share one file.
+              """
               data, digest = fetch_url(url, expect_sha, label)
-              staged = os.path.join(
-                  env("RUNNER_TEMP"), f"plan-url-{tag}.yaml"
+              handover = os.path.join(
+                  env("RUNNER_TEMP"), "lint-url-configs"
               )
+              os.makedirs(handover, exist_ok=True)
+              staged = os.path.join(handover, f"{digest}.yaml")
               with open(staged, "wb") as handle:
                   handle.write(data)
               return staged, digest
@@ -2895,7 +2912,7 @@ jobs:
                            " mutually exclusive")
                   if cfg_url:
                       staged, digest = stage_url_config(
-                          cfg_url, sha, str(index), label
+                          cfg_url, sha, label
                       )
                       fields = {
                           "kind": "url",
@@ -2984,7 +3001,7 @@ jobs:
                   ids = parse_hook_list(in_hooks, "hooks")
               if in_cfg_url:
                   staged, digest = stage_url_config(
-                      in_cfg_url, in_sha, "input", "config_url"
+                      in_cfg_url, in_sha, "config_url"
                   )
                   fields = {
                       "kind": "url",
@@ -3098,15 +3115,39 @@ jobs:
                       add_task("lint-all", fields, "")
 
           has_work = "true" if tasks else "false"
+          # The matrix is a job output and so readable by anyone who
+          # can read the run. A url task's config is written redacted,
+          # origin and path only: the lint job takes the bytes from
+          # the hand-over artifact, never from the address. 'tasks'
+          # itself stays whole, so display_config below redacts once.
           matrix = json.dumps(
-              {"include": tasks}, separators=(",", ":")
+              {
+                  "include": [
+                      dict(task, config=redact_url(task["config"]))
+                      if task.get("kind") == "url"
+                      else task
+                      for task in tasks
+                  ]
+              },
+              separators=(",", ":"),
           )
+          url_configs = any(task.get("kind") == "url" for task in tasks)
           with open(
               env("GITHUB_OUTPUT"), "a", encoding="utf-8"
           ) as handle:
               handle.write(f"has_work={has_work}\n")
               if tasks:
                   handle.write(f"matrix={matrix}\n")
+                  flag = "true" if url_configs else "false"
+                  handle.write(f"url_configs={flag}\n")
+                  # Unique per invocation: one run can call this
+                  # workflow several times, and an artifact name may
+                  # appear once per run.
+                  if url_configs:
+                      handle.write(
+                          "handover_name=lint-url-configs-"
+                          f"{uuid.uuid4().hex}\n"
+                      )
           with open(
               env("GITHUB_STEP_SUMMARY"), "a", encoding="utf-8"
           ) as handle:
@@ -3127,6 +3168,23 @@ jobs:
           print(f"Resolved {len(tasks)} lint task(s) 💬")
           # END lint_plan
           PYEOF
+
+      # Hand the lint jobs the configuration a config_url named, not
+      # the URL itself. A presigned URL carries its signature in the
+      # query, and the matrix that would otherwise carry it is a job
+      # output any reader of the run can see. The artifact holds the
+      # bytes the resolver validated, named by their SHA-256, and
+      # needs no permission beyond the runner's own Actions token.
+      - name: 'Upload URL configurations'
+        id: handover
+        if: steps.resolve.outputs.url_configs == 'true'
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: ${{ steps.resolve.outputs.handover_name }}
+          path: ${{ runner.temp }}/lint-url-configs/
+          retention-days: 1
+          if-no-files-found: error
 
   lint:
     name: 'Lint: ${{ matrix.name }}'
@@ -3387,6 +3445,44 @@ jobs:
           echo "$digest  $target" | sha256sum --check --strict -
           echo 'Organisation configuration checksum verified ✅'
 
+      # The configuration a config_url named, as the plan job
+      # fetched and validated it. The lint job never contacts the
+      # configuration host, so it runs exactly the bytes that were
+      # planned against and needs no copy of the URL.
+      - name: 'Download URL configuration'
+        if: matrix.kind == 'url'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          artifact-ids: ${{ needs.plan.outputs.config_artifact_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/lint-url-configs
+
+      # Re-verify the handed-over bytes against the digest the plan
+      # recorded, as the organisation fetch above does.
+      - name: 'Verify URL configuration'
+        if: matrix.kind == 'url'
+        env:
+          EXPECT_SHA256: ${{ matrix.sha256 }}
+        run: |
+          # Verify URL configuration
+          set -euo pipefail
+          # Checked BEFORE it names a path, so a malformed digest
+          # cannot walk out of the hand-over directory.
+          if ! printf '%s' "$EXPECT_SHA256" |
+            grep -qE '^[0-9a-f]{64}$'; then
+            echo '::error::invalid URL configuration digest ❌'
+            exit 1
+          fi
+          target="$RUNNER_TEMP/lint-url-configs/$EXPECT_SHA256.yaml"
+          if ! echo "$EXPECT_SHA256  $target" |
+            sha256sum --check --strict -; then
+            echo '::error::URL configuration does not match the' \
+              'digest the plan recorded ❌'
+            exit 1
+          fi
+          echo 'URL configuration checksum verified ✅'
+
       - name: 'Run linting'
         # Pinned to the COMMIT the v0.8.0 annotated tag points at, not
         # the tag object's own SHA, which 'uses:' cannot resolve.
@@ -3427,11 +3523,12 @@ jobs:
           # yamllint disable-line rule:line-length
           per_hook_runs: ${{ inputs.per_hook_runs && 'true' || 'false' }}
           commit_range: ${{ inputs.commit_range }}
+          # A repo task names its file; org and url tasks run a file
+          # verified under the runner temp directory above. A url
+          # task's matrix.config is redacted and is never forwarded:
+          # the executor gets no config_url, so it fetches nothing.
           # yamllint disable-line rule:line-length
-          config_path: ${{ matrix.kind == 'repo' && matrix.config || (matrix.kind == 'org' && format('{0}/org-lint-config.yaml', runner.temp) || '') }}
-          config_url: ${{ matrix.kind == 'url' && matrix.config || '' }}
-          # yamllint disable-line rule:line-length
-          config_sha256: ${{ matrix.kind == 'url' && matrix.sha256 || '' }}
+          config_path: ${{ matrix.kind == 'repo' && matrix.config || (matrix.kind == 'org' && format('{0}/org-lint-config.yaml', runner.temp) || (matrix.kind == 'url' && format('{0}/lint-url-configs/{1}.yaml', runner.temp, matrix.sha256) || '')) }}
           path_prefix: ${{ inputs.path_prefix }}
           branch_name: ${{ inputs.branch_name }}
           prek_version: ${{ inputs.prek_version }}

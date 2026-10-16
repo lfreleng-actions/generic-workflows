@@ -481,12 +481,11 @@ configuration is attacker-controlled.
   no hijack.
 - **The job summary redacts `config_url`.** The accepted URL grammar
   admits a query string, which is how a private configuration
-  commonly arrives — a presigned URL. The executor receives the URL
-  whole; the summary, which anyone able to see the run can read,
-  receives an origin and a path plus a note naming each part it
-  dropped. The redirect refusal goes through the same redaction,
-  since a target chosen by the server inherits whatever the caller's
-  URL carried.
+  commonly arrives — a presigned URL. The summary, which anyone able
+  to see the run can read, receives an origin and a path plus a note
+  naming each part it dropped. The redirect refusal goes through the
+  same redaction, since a target chosen by the server inherits
+  whatever the caller's URL carried.
 - **The planner rejects credentials in a URL.** `https://user:pass@host/...`
   validates against the grammar but cannot work: `urllib` leaves the
   pair in `Request.host` and builds no `Authorization` header, so the
@@ -494,16 +493,29 @@ configuration is attacker-controlled.
   mid-download, the planner refuses it and says why. A presigned
   query string remains the supported route, and that one works.
 
-  **A presigned URL is still not a secret-bearing one.** The plan job
-  passes `config_url` to the lint job through the matrix, so the
-  query string reaches `GITHUB_OUTPUT` and the workflow's `matrix`
-  output, which anyone able to read the run can see. Redaction covers
-  what this workflow *prints*, not what it must hand onward. Prefer a
-  URL that needs no credential, pinned with `config_sha256`; a
-  signature short-lived enough to expire before the log matters is
-  the next best thing.
-  lfreleng-actions/generic-workflows#52 tracks removing the URL from
-  job outputs altogether.
+  **The URL never leaves the plan job.** The matrix, and with it
+  `GITHUB_OUTPUT` and the workflow's `matrix` output, carries no
+  more of a url task's address than its origin and path, redacted as
+  in the summary. The lint job receives the configuration instead:
+  the plan job uploads the bytes it validated as a run artifact,
+  named by their SHA-256 and kept for one day. Anyone who can read
+  the run can download that artifact. That is no wider than before,
+  since the same readers could fetch the file through the URL the
+  matrix used to carry, and the file grants no access beyond its own
+  contents. "Re-run failed jobs" more than a day later fails to
+  download the expired hand-over; "Re-run all jobs" plans again and
+  fetches afresh.
+
+  No URL reaches an output, so GitHub's secret masking no longer
+  bears on it. Had one done so, GitHub documents under
+  `jobs.<job_id>.outputs` that the runner withholds any output
+  containing a secret from GitHub Actions, with the warning "Skip
+  output `{output.Key}` since it may contain secret": the *whole*
+  `matrix` output would vanish, URL and plan alike.
+
+  Callers remain responsible for how the URL reaches `with:`.
+  `jobs.<job_id>.with` accepts the `github` and `needs` contexts
+  alone, so it cannot come from `secrets` directly.
 - **Path containment before first read.** `path_prefix`,
   `config_path` and `org_config_path` must be relative, free of `..`,
   and free of any component starting with `-` (such a path reads as
@@ -529,27 +541,12 @@ configuration is attacker-controlled.
   checking the final URL after `urlopen` has already issued the
   plaintext request. A remote configuration never overwrites a
   repository file; prek receives it via `--config`.
-
-  The executor re-fetches the same URL with `curl`, and reaches the
-  same property by a different mechanism — worth recording, because
-  it reads like a gap, and review has flagged it twice. `--proto`
-  is a ceiling on **every** request in the exchange, not a filter on
-  the first, so `--proto-redir` is unnecessary:
-
-  ```console
-  $ curl --proto '=https' --tlsv1.2 --location http://host/start
-  curl: (1) Protocol "http" disabled
-  ```
-
-  curl's manual states it directly: "Protocols denied by `--proto`
-  are not overridden by this option." The digest verifies bytes and
-  would not, on its own, prevent a plaintext request — which is why
-  the transport restriction has to hold per hop on both sides.
 - **No planning/linting drift.** The plan job hashes every remote
-  configuration and passes the digest to the lint job, which verifies
-  the same bytes it fetches. A git blob SHA pins the organisation
-  fallback, and its digest gets verified too, so what ran cannot
-  differ from what the plan validated.
+  configuration and hands the lint job the bytes it validated, which
+  the lint job verifies against the digest before running them. The
+  lint job never fetches the URL a second time. A git blob SHA pins
+  the organisation fallback, and its digest gets verified too, so
+  what ran cannot differ from what the plan validated.
 - **Bounded fan-out.** The plan caps at 50 tasks, and hook ids, task
   names, paths and digests are pattern-checked, so a hostile
   configuration cannot spawn unbounded jobs, smuggle shell
@@ -772,6 +769,8 @@ runs under `block`, so a regression of either kind fails here first.
 
 Both come from a fixed vocabulary or from plan-validated data, so a
 caller may use `has_work` in a `run:` block without laundering it.
+For a url task, `matrix` carries a redacted `config`: an origin and a
+path, as in the job summary.
 
 ## Migration from compose-repo-linting
 
