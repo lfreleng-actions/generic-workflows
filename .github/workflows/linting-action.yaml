@@ -25,18 +25,22 @@
 # resolves to the NAME, so an unmarked caller here would collide with
 # an organisation-injected workflow of the same name.
 #
-# Five jobs. The first three each exercise ONE selection mode: two
+# Seven jobs. The first three each exercise ONE selection mode: two
 # name hooks explicitly and take the configuration through primary
 # discovery; the third names a small fixture configuration and runs
-# every hook in it, which is the run-all task shape. The last two run
+# every hook in it, which is the run-all task shape. The next two run
 # fixture projects through the project-toolchain preparation, one for
-# Rust and one for Node.js. Adopting the no-input default against
-# this repository's real configuration would lint the whole tree
-# twice on every push, since pre-commit.ci already does it on the
-# same pull request. See the job comments below.
+# Rust and one for Node.js. The last pair takes a fixture through
+# config_url under the 'block' egress policy, then checks that the
+# URL's query string never reached the reusable's matrix output.
+# Adopting the no-input default against this repository's real
+# configuration would lint the whole tree twice on every push, since
+# pre-commit.ci already does it on the same pull request. See the job
+# comments below.
 #
-# The ci.skip job also runs under the 'block' egress policy with the
-# organisation allow-list, the one place blocking is proven to work.
+# The ci.skip and config_url jobs also run under the 'block' egress
+# policy with the organisation allow-list, which proves blocking
+# works for the workflow's own traffic and for the artifact hand-over.
 # =============================================================================
 name: 'Linting (self) 🧹'
 
@@ -166,3 +170,67 @@ jobs:
       ci_skipped: true
       config_path: 'tests/resources/node-toolchain-lint-config.yaml'
       path_prefix: 'tests/fixtures/node'
+
+  # The config_url route, end to end: the plan job fetches the
+  # fixture, hands the bytes over as an artifact, and the lint job
+  # runs them without contacting the host. Under 'block' egress, so
+  # the artifact transfer is proven to fit the organisation
+  # allow-list. The head repository and SHA, because a pull request
+  # from a fork serves its fixture from the fork.
+  #
+  # The query string stands in for a presigned URL's signature; the
+  # job below fails if it reaches the matrix output.
+  linting-url:
+    name: 'Linting (self, config_url)'
+    permissions:
+      contents: read
+    uses: $/.github/workflows/linting.yaml
+    with:
+      # yamllint disable-line rule:line-length
+      config_url: ${{ format('https://raw.githubusercontent.com/{0}/{1}/tests/resources/minimal-lint-config.yaml?selftest-signature=issue-52', github.event.pull_request.head.repo.full_name || github.repository, github.event.pull_request.head.sha || github.sha) }}
+      skip_hooks: 'run-all-must-be-skipped'
+      harden_runner_egress: 'block'
+
+  linting-url-output-check:
+    name: 'Linting (self, config_url output)'
+    needs: linting-url
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
+        with:
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@56d70f0eae78f334a598d1ffe071d4b821517b22'  # v0.17.1
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Check the matrix output carries no query string'
+        env:
+          MATRIX: ${{ needs.linting-url.outputs.matrix }}
+        run: |
+          # Check the matrix output carries no query string
+          set -euo pipefail
+          # An empty matrix would pass the query check vacuously.
+          if [ -z "$MATRIX" ]; then
+            echo '::error::the config_url matrix output is empty ❌'
+            exit 1
+          fi
+          if ! printf '%s' "$MATRIX" | grep -qF '"kind":"url"'; then
+            echo '::error::the matrix holds no url task ❌'
+            exit 1
+          fi
+          if printf '%s' "$MATRIX" | grep -qF 'selftest-signature'; then
+            echo "::error::the config_url query reached the" \
+              "reusable workflow's matrix output ❌"
+            exit 1
+          fi
+          echo 'The matrix output carries no query string ✅'

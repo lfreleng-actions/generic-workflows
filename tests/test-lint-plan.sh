@@ -98,18 +98,18 @@ fi
 #
 # urlopen's 'timeout=' bounds ONE blocking socket operation, not the
 # transfer. A server dribbling bytes inside that window holds a
-# connection open indefinitely, and planning would then accept a URL
-# the executor's 'curl --max-time 60' refuses -- a plan that resolves
-# cleanly and fails in every lint job. The wall-clock deadline is what
-# stops that, so assert it is still there.
+# connection open indefinitely, and the plan job -- the only job that
+# fetches a config_url -- would then run until its own timeout
+# instead of failing with a diagnosis. The wall-clock deadline is
+# what stops that, so assert it is still there.
 if ! grep -q 'time.monotonic() + DOWNLOAD_TIMEOUT' "${resolver}"; then
   echo 'ERROR: the URL download in' >&2
   echo "       ${workflow}" >&2
   echo '       no longer enforces a wall-clock deadline.' >&2
   echo "       urlopen's timeout= bounds one socket read, not the" >&2
-  echo '       transfer, so a slow-trickle server would be accepted' >&2
-  echo "       at plan time and rejected by the executor's" >&2
-  echo '       curl --max-time. Restore the monotonic deadline.' >&2
+  echo '       transfer, so a slow-trickle server would hold the' >&2
+  echo '       plan job open until it times out. Restore the' >&2
+  echo '       monotonic deadline.' >&2
   exit 1
 fi
 
@@ -184,21 +184,84 @@ if [ -z "${read_line}" ] || [ -z "${deadline_line}" ] ||
   echo "       ${workflow}" >&2
   echo '       no longer sits between the read and the EOF break.' >&2
   echo '       After the break it misses a server that stalls on' >&2
-  echo '       close, and planning then accepts a transfer the' >&2
-  echo '       executor refuses.' >&2
+  echo '       close, and planning then accepts a transfer that' >&2
+  echo '       overran its deadline.' >&2
   exit 1
 fi
 
-# The planner must refuse what the executor cannot fetch. These two
-# numbers are one contract kept in two repositories, so a change here
-# needs a matching change to standalone-linting-action.
+# The per-fetch deadline is documented behaviour, and the resolver's
+# plan-wide download budget is reasoned against it, so a change has
+# to be deliberate rather than incidental.
 if ! grep -q '^DOWNLOAD_TIMEOUT = 60$' "${resolver}"; then
-  echo 'ERROR: DOWNLOAD_TIMEOUT no longer matches the executor' >&2
-  echo "       action's 'curl --max-time 60'. Planning and" >&2
-  echo '       execution would disagree about which URLs are' >&2
-  echo '       fetchable. Change both, or neither.' >&2
+  echo 'ERROR: DOWNLOAD_TIMEOUT is no longer 60 seconds.' >&2
+  echo '       PLAN_DOWNLOAD_BUDGET is reasoned against it;' >&2
+  echo '       revisit both together, and this check with them.' >&2
   exit 1
 fi
+
+# A second resolver for the url route. The real one accepts https
+# alone, so no fixture could otherwise reach a url task end to end.
+# This copy differs in ONE top-level function: fetch_url reads its
+# bytes from $STUB_CONFIG_FILE instead of the network, and keeps the
+# digest check. Everything that consumes the fetched bytes -- staging,
+# the matrix, the outputs -- is the shipped code.
+#
+# The stub sits beside the extracted resolver and finds it by its own
+# location, so nothing is interpolated into the Python source.
+stub_resolver="${workdir}/plan-stub.py"
+cat > "${stub_resolver}" <<'PYEOF'
+import ast
+import os
+import sys
+
+PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plan.py")
+STUB = """
+def fetch_url(url, expect_sha, label):
+    with open(os.environ["STUB_CONFIG_FILE"], "rb") as handle:
+        data = handle.read()
+    digest = hashlib.sha256(data).hexdigest()
+    if expect_sha and digest != expect_sha.lower():
+        fail(f"{label} content does not match config_sha256")
+    return data, digest
+"""
+
+with open(PATH, encoding="utf-8") as handle:
+    tree = ast.parse(handle.read(), PATH)
+found = [
+    index
+    for index, node in enumerate(tree.body)
+    if isinstance(node, ast.FunctionDef) and node.name == "fetch_url"
+]
+if len(found) != 1:
+    sys.exit(f"STUB: {len(found)} top-level fetch_url, expected 1")
+tree.body[found[0]] = ast.parse(STUB).body[0]
+ast.fix_missing_locations(tree)
+exec(compile(tree, PATH, "exec"), {"__name__": "__main__"})
+PYEOF
+
+# Checked once, here, so a renamed or duplicated fetch_url fails the
+# suite rather than quietly turning every url case into a rejection.
+if ! "${PY_RUN[@]}" - "${resolver}" <<'PYEOF'
+import ast
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    tree = ast.parse(handle.read())
+count = sum(
+    isinstance(node, ast.FunctionDef) and node.name == "fetch_url"
+    for node in tree.body
+)
+sys.exit(0 if count == 1 else f"{count} top-level fetch_url")
+PYEOF
+then
+  echo 'ERROR: the url-route stub needs exactly one top-level' >&2
+  echo "       fetch_url in ${workflow}" >&2
+  exit 1
+fi
+
+# The file check() runs. Url-route cases switch it to the stub and
+# back; every other case runs the real resolver.
+resolver_file="${resolver}"
 
 passed=0
 failed=0
@@ -233,7 +296,7 @@ check() {
     INPUT_SPLIT_HOOKS='true' \
     INPUT_ORG_CONFIG_PATH='linting/.pre-commit-config.yaml' \
     "$@" \
-    "${PY_RUN[@]}" "${resolver}" \
+    "${PY_RUN[@]}" "${resolver_file}" \
     > "${workdir}/stdout" 2>&1; then
     got='err'
   fi
@@ -1724,6 +1787,193 @@ for input in rust_toolchain_setup rust_components node_setup \
     printf 'FAIL: %s wiring: %s\n' "${input}" "${got}" >&2
   fi
 done
+
+# --- URL configuration hand-over --------------------------------------
+#
+# A url task's address must not reach GITHUB_OUTPUT: the matrix is a
+# job output any reader of the run can see, and a presigned URL
+# carries its signature in the query. The plan job hands the lint jobs
+# the bytes instead, as an artifact named by their SHA-256.
+
+out_lacks() {
+  local desc="$1" needle="$2"
+
+  if grep -qF -- "${needle}" "${workdir}/out"; then
+    failed=$((failed + 1))
+    printf 'FAIL: %s (output unexpectedly has %s)\n' "${desc}" \
+      "${needle}" >&2
+    sed 's/^/  /' "${workdir}/out" >&2
+    return 0
+  fi
+  passed=$((passed + 1))
+}
+
+out_has_line() {
+  local desc="$1" pattern="$2"
+
+  if grep -qE -- "${pattern}" "${workdir}/out"; then
+    passed=$((passed + 1))
+    return 0
+  fi
+  failed=$((failed + 1))
+  printf 'FAIL: %s (output has no line matching %s)\n' "${desc}" \
+    "${pattern}" >&2
+  sed 's/^/  /' "${workdir}/out" >&2
+}
+
+handed_over() {
+  local desc="$1" staged
+
+  staged="${workdir}/lint-url-configs/${stub_digest}.yaml"
+  if [ -f "${staged}" ] && cmp -s "${stub_config}" "${staged}"; then
+    passed=$((passed + 1))
+    return 0
+  fi
+  failed=$((failed + 1))
+  printf 'FAIL: %s (%s missing or not the fixture bytes)\n' \
+    "${desc}" "${staged}" >&2
+}
+
+stub_config="${repo_root}/tests/resources/minimal-lint-config.yaml"
+# Hashed with the suite's own interpreter rather than sha256sum, which
+# is GNU coreutils: stock macOS ships shasum instead, and this hook
+# supplies Python and PyYAML, not coreutils.
+stub_digest="$("${PY_RUN[@]}" - "${stub_config}" <<'PYEOF'
+import hashlib
+import sys
+
+with open(sys.argv[1], "rb") as handle:
+    print(hashlib.sha256(handle.read()).hexdigest())
+PYEOF
+)"
+if ! printf '%s' "${stub_digest}" | grep -qE '^[0-9a-f]{64}$'; then
+  echo "ERROR: could not hash ${stub_config}" >&2
+  exit 1
+fi
+signed_url='https://example.org/c.yaml?X-Amz-Signature=SENTINEL52'
+redacted='"config":"https://example.org/c.yaml (query redacted)"'
+resolver_file="${stub_resolver}"
+
+rm -rf "${workdir}/lint-url-configs"
+accept 'a scalar config_url plans' \
+  STUB_CONFIG_FILE="${stub_config}" INPUT_CONFIG_URL="${signed_url}"
+out_lacks 'a scalar config_url signature stays out of outputs' \
+  'SENTINEL52'
+matrix_contains 'a scalar config_url is a url task' '"kind":"url"'
+matrix_contains 'a scalar config_url is redacted in the matrix' \
+  "${redacted}"
+out_has_line 'a scalar config_url sets url_configs' '^url_configs=true$'
+out_has_line 'a scalar config_url names a unique hand-over' \
+  '^handover_name=lint-url-configs-[0-9a-f]{32}$'
+handed_over 'a scalar config_url stages the bytes by digest'
+
+rm -rf "${workdir}/lint-url-configs"
+accept 'a plan entry config_url plans' \
+  STUB_CONFIG_FILE="${stub_config}" \
+  INPUT_PLAN="[{\"name\":\"a\",\"config_url\":\"${signed_url}\"}]"
+out_lacks 'a plan entry signature stays out of outputs' 'SENTINEL52'
+matrix_contains 'a plan entry config_url is a url task' '"kind":"url"'
+matrix_contains 'a plan entry config_url is redacted in the matrix' \
+  "${redacted}"
+out_has_line 'a plan entry config_url sets url_configs' \
+  '^url_configs=true$'
+out_has_line 'a plan entry config_url names a unique hand-over' \
+  '^handover_name=lint-url-configs-[0-9a-f]{32}$'
+handed_over 'a plan entry config_url stages the bytes by digest'
+
+reject 'a config_sha256 the fetched bytes do not match' \
+  STUB_CONFIG_FILE="${stub_config}" INPUT_CONFIG_URL="${signed_url}" \
+  INPUT_CONFIG_SHA256="$(printf '0%.0s' {1..64})"
+stdout_contains 'the mismatch is named' 'does not match config_sha256'
+
+resolver_file="${resolver}"
+
+accept 'a plan with no url task'
+out_has_line 'no url task sets url_configs=false' '^url_configs=false$'
+out_lacks 'no url task names no hand-over' 'handover_name='
+
+# The workflow half of the hand-over, which no resolver fixture can
+# reach: the plan job uploads, the lint job downloads and verifies
+# before the executor runs, and the executor is never given the URL.
+handover_wiring() {
+  "${PY_RUN[@]}" - "${workflow}" <<'PYEOF'
+import re
+import sys
+
+import yaml
+
+with open(sys.argv[1], encoding='utf-8') as handle:
+    doc = yaml.safe_load(handle)
+plan = doc['jobs']['plan']
+lint = doc['jobs']['lint']
+PIN = re.compile(r'@[0-9a-f]{40}$')
+
+
+def index_of(steps, prefix):
+    found = [
+        index for index, step in enumerate(steps)
+        if str(step.get('uses', '')).startswith(prefix)
+    ]
+    return found[0] if len(found) == 1 else None
+
+
+steps = plan['steps']
+up = index_of(steps, 'actions/upload-artifact@')
+if up is None:
+    sys.exit('plan job has no single upload-artifact step')
+upload = steps[up]
+if not PIN.search(upload['uses']):
+    sys.exit(f"upload is not pinned to a commit SHA: {upload['uses']}")
+if upload.get('if') != "steps.resolve.outputs.url_configs == 'true'":
+    sys.exit(f"upload condition is {upload.get('if')!r}")
+if upload.get('with', {}).get('retention-days') != 1:
+    sys.exit('upload does not set retention-days: 1')
+resolve = [i for i, s in enumerate(steps) if s.get('id') == 'resolve']
+if not resolve or resolve[0] > up:
+    sys.exit('upload does not follow the resolve step')
+want = '${{ steps.%s.outputs.artifact-id }}' % upload.get('id')
+if plan.get('outputs', {}).get('config_artifact_id') != want:
+    sys.exit('plan job does not output config_artifact_id')
+
+steps = lint['steps']
+run = index_of(steps, 'lfreleng-actions/standalone-linting-action@')
+down = index_of(steps, 'actions/download-artifact@')
+if run is None or down is None:
+    sys.exit('lint job lacks the executor or a download step')
+download = steps[down]
+if not PIN.search(download['uses']):
+    sys.exit(f"download is not pinned: {download['uses']}")
+if download.get('with', {}).get('artifact-ids') != (
+        '${{ needs.plan.outputs.config_artifact_id }}'):
+    sys.exit('download does not use artifact-ids from the plan job')
+verify = [
+    i for i, s in enumerate(steps)
+    if 'sha256sum --check --strict' in str(s.get('run', ''))
+    and '${{ matrix.sha256 }}' in s.get('env', {}).values()
+    and s.get('if') == "matrix.kind == 'url'"
+]
+if not verify or not down < verify[0] < run:
+    sys.exit('no url digest verification between download and executor')
+
+given = steps[run].get('with', {})
+for name in ('config_url', 'config_sha256'):
+    if name in given:
+        sys.exit(f'executor still receives {name}')
+for name, value in given.items():
+    rest = str(value).replace("matrix.kind == 'repo' && matrix.config", '')
+    if 'matrix.config' in rest:
+        sys.exit(f'executor {name} forwards matrix.config beyond repo')
+print('ok')
+PYEOF
+}
+
+got="$(handover_wiring 2>&1 || true)"
+if [ "${got}" = 'ok' ]; then
+  passed=$((passed + 1))
+else
+  failed=$((failed + 1))
+  printf 'FAIL: URL hand-over wiring: %s\n' "${got}" >&2
+fi
 
 # --- Result ----------------------------------------------------------
 
