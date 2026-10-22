@@ -207,3 +207,18 @@ repos:
         # so that editing it runs them.
         # yamllint disable-line rule:line-length
         files: '^(\.github/workflows/linting\.yaml|tests/test-lint-plan\.sh|\.pre-commit-config\.yaml)$'
+
+  # Fixtures for the change isolation plan and report. The test
+  # extracts both scripts from the workflow, so it runs whenever
+  # either the workflow or the fixtures change. 'language: system'
+  # with an explicit bash: the scripts need only git and python3,
+  # which every runner of these hooks has.
+  - repo: local
+    hooks:
+      - id: change-isolation-fixtures
+        name: Change isolation plan and report fixtures
+        entry: bash tests/test-change-isolation-plan.sh
+        language: system
+        pass_filenames: false
+        # yamllint disable-line rule:line-length
+        files: '^(\.github/workflows/change-isolation\.yaml|tests/test-change-isolation-plan\.sh)$'
