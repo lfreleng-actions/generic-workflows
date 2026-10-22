@@ -1,0 +1,175 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# =============================================================================
+# EXAMPLE: Gerrit change isolation caller (FD.io shape: INFO.yaml only)
+# =============================================================================
+# gerrit_to_platform dispatches this workflow when a patchset arrives in
+# Gerrit. It clears the previous vote, runs the reusable change
+# isolation workflow with the INFO.yaml policy alone, and votes Verified
+# on the change from the run's overall conclusion.
+#
+# One policy: a change to the root INFO.yaml must touch nothing else.
+# When the change touches INFO.yaml, a separate job validates the file;
+# deleting it, or renaming it away, fails. Changes under .github/ are
+# not checked; see gerrit.yaml beside this file for that policy.
+#
+# DEPLOYMENT NOTES:
+#   * As a required workflow in an organisation's '.github' repository,
+#     the dispatcher fills TARGET_REPO with the project under review,
+#     passed on as 'repository' so the checkout targets that project.
+#   * Copied into a project instead, name the file with BOTH 'gerrit'
+#     AND 'verify' so gerrit_to_platform discovers it. TARGET_REPO then
+#     stays empty and the caller's own repository is checked out.
+#   * Set the variables GERRIT_SERVER, GERRIT_SSH_REQUIRED_USER,
+#     GERRIT_KNOWN_HOSTS and GERRIT_URL, and the secret
+#     GERRIT_SSH_REQUIRED_PRIVKEY.
+#   * To report without voting, add comment-only: true to both
+#     gerrit-review-action steps.
+#
+# Voting lives here rather than in the reusable workflow, so the
+# reusable never receives the Gerrit SSH key, and which account votes
+# stays this caller's choice.
+# =============================================================================
+name: 'Gerrit Required INFO.yaml Verify'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_dispatch:
+    inputs:
+      GERRIT_BRANCH:
+        description: 'Branch that change is against'
+        required: true
+        type: string
+      GERRIT_CHANGE_ID:
+        description: 'The ID for the change'
+        required: true
+        type: string
+      GERRIT_CHANGE_NUMBER:
+        description: 'The Gerrit number'
+        required: true
+        type: string
+      GERRIT_CHANGE_URL:
+        description: 'URL to the change'
+        required: true
+        type: string
+      GERRIT_EVENT_TYPE:
+        description: 'Type of Gerrit event'
+        required: true
+        type: string
+      GERRIT_PATCHSET_NUMBER:
+        description: 'The patch number for the change'
+        required: true
+        type: string
+      GERRIT_PATCHSET_REVISION:
+        description: 'The revision sha'
+        required: true
+        type: string
+      GERRIT_PROJECT:
+        description: 'Project in Gerrit'
+        required: true
+        type: string
+      GERRIT_REFSPEC:
+        description: 'Gerrit refspec of change'
+        required: true
+        type: string
+      TARGET_REPO:
+        description: 'GitHub repository under review (owner/name)'
+        required: false
+        type: string
+        default: ''
+
+concurrency:
+  # Gerrit allows the same Change-Id in more than one project, and a
+  # central '.github' repository dispatches for every project, so the
+  # project keeps one project's run from cancelling another's.
+  # yamllint disable-line rule:line-length
+  group: info-yaml-${{ github.workflow }}-${{ inputs.GERRIT_PROJECT }}-${{ inputs.GERRIT_BRANCH }}-${{ inputs.GERRIT_CHANGE_ID || github.run_id }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  prepare:
+    name: 'Clear vote'
+    runs-on: ubuntu-latest
+    # Votes travel to Gerrit over SSH, so GITHUB_TOKEN needs no scopes.
+    permissions: {}
+    timeout-minutes: 5
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
+        with:
+          egress-policy: audit
+      - name: 'Clear votes'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/gerrit-review-action@d56b0b5c81402f8cb435aaca513bebdea3be951e  # v1.2.0
+        with:
+          host: ${{ vars.GERRIT_SERVER }}
+          username: ${{ vars.GERRIT_SSH_REQUIRED_USER }}
+          key: ${{ secrets.GERRIT_SSH_REQUIRED_PRIVKEY }}
+          known_hosts: ${{ vars.GERRIT_KNOWN_HOSTS }}
+          gerrit-change-number: ${{ inputs.GERRIT_CHANGE_NUMBER }}
+          gerrit-patchset-number: ${{ inputs.GERRIT_PATCHSET_NUMBER }}
+          vote-type: clear
+      - name: 'Allow replication'
+        run: sleep 10s
+
+  change-isolation:
+    name: 'Change Isolation'
+    needs: prepare
+    permissions:
+      contents: read
+    # REPLACE the pinned SHA below with a generic-workflows release SHA.
+    # The all-zero SHA is a non-functional placeholder, NOT a real commit.
+    # yamllint disable-line rule:line-length
+    uses: lfreleng-actions/generic-workflows/.github/workflows/change-isolation.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
+    with:
+      checks: |
+        [
+          {"name": "INFO.yaml", "paths": "/INFO.yaml"}
+        ]
+      repository: ${{ inputs.TARGET_REPO }}
+      gerrit_refspec: ${{ inputs.GERRIT_REFSPEC }}
+      gerrit_project: ${{ inputs.GERRIT_PROJECT }}
+      gerrit_branch: ${{ inputs.GERRIT_BRANCH }}
+      # gerrit_url falls back to the GERRIT_URL repository variable.
+    # A private TARGET_REPO needs a token with read access to it;
+    # GITHUB_TOKEN reaches the repository running this workflow alone.
+    # secrets:
+    #   token: ${{ secrets.TARGET_REPO_READ_TOKEN }}
+
+  vote:
+    name: 'Set vote'
+    if: ${{ always() }}
+    needs: [prepare, change-isolation]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read  # workflow-conclusion reads job results via the API
+    timeout-minutes: 5
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
+        with:
+          egress-policy: audit
+      - name: 'Get conclusion'
+        # yamllint disable-line rule:line-length
+        uses: im-open/workflow-conclusion@8eac7f17381a6917bc04fec3e2c92e70ebc37526  # v3.0.0
+      - name: 'Set vote'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/gerrit-review-action@d56b0b5c81402f8cb435aaca513bebdea3be951e  # v1.2.0
+        with:
+          host: ${{ vars.GERRIT_SERVER }}
+          username: ${{ vars.GERRIT_SSH_REQUIRED_USER }}
+          key: ${{ secrets.GERRIT_SSH_REQUIRED_PRIVKEY }}
+          known_hosts: ${{ vars.GERRIT_KNOWN_HOSTS }}
+          gerrit-change-number: ${{ inputs.GERRIT_CHANGE_NUMBER }}
+          gerrit-patchset-number: ${{ inputs.GERRIT_PATCHSET_NUMBER }}
+          # workflow-conclusion does not recognise a 'timed_out' job
+          # and can then report success; a dependency that did not
+          # succeed must never earn a positive vote.
+          # yamllint disable-line rule:line-length
+          vote-type: ${{ (needs.prepare.result != 'success' || needs.change-isolation.result != 'success') && env.WORKFLOW_CONCLUSION == 'success' && 'failure' || env.WORKFLOW_CONCLUSION }}

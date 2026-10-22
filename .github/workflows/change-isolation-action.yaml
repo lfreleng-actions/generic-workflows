@@ -1,0 +1,53 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# =============================================================================
+# Thin change isolation caller (self-test)
+# =============================================================================
+# This repository consumes its own reusable change isolation workflow,
+# so every pull request raised here runs the wiring shipped to
+# consumers: plan -> one isolation leg per check -> report, and the
+# INFO.yaml job skipped because this repository has no INFO.yaml.
+#
+# A deterministic violation cannot be forced against an arbitrary pull
+# request's diff, so the violation, advisory and missing-result paths
+# are covered offline by tests/test-change-isolation-plan.sh instead.
+#
+# The reusable is referenced with the self-repository form ('$/'),
+# which resolves this repository at the commit already running, so the
+# branch's own copy runs. Consumers pin a released SHA instead, as
+# examples/change-isolation/ shows.
+#
+# The '-action' suffix is a local disambiguator: a caller in this
+# repository cannot share a file name with the reusable it calls.
+# =============================================================================
+name: 'Change Isolation (self) 🔒'
+
+# yamllint disable-line rule:truthy
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions: {}
+
+concurrency:
+  group: 'change-isolation-self-${{ github.ref }}'
+  cancel-in-progress: true
+
+jobs:
+  change-isolation:
+    name: 'Change Isolation (self)'
+    permissions:
+      contents: read
+    uses: $/.github/workflows/change-isolation.yaml
+    with:
+      # The CI/CD check is advisory: pull requests here routinely
+      # change workflows and documentation together, so a blocking
+      # .github policy would fail most of them. The INFO.yaml check
+      # blocks, and never triggers in a repository without the file.
+      checks: |
+        [
+          {"name": "INFO.yaml", "paths": "/INFO.yaml"},
+          {"name": "CI/CD", "paths": ".github/**", "advisory": true}
+        ]

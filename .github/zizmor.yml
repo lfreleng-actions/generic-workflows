@@ -48,6 +48,8 @@ rules:
       # suppression would travel with them, masking a genuine finding in
       # their repository once they replace the placeholder.
       - gerrit.yaml:51
+      - gerrit.yaml:128
+      - gerrit-info-yaml-only.yaml:128
       - github.yaml:46
       - github.yaml:59
       - github.yaml:90
@@ -72,8 +74,29 @@ rules:
       # matching, and the finding reappears rather than a file-wide
       # ignore hiding a real one.
       - gerrit.yaml:51
+      - gerrit.yaml:128
+      - gerrit-info-yaml-only.yaml:128
       - github.yaml:46
       - github.yaml:59
       - github.yaml:90
       - github.yaml:83
       - github.yaml:96
+
+  secrets-outside-env:
+    ignore:
+      # The Gerrit change isolation examples hand the voting account's
+      # SSH key to gerrit-review-action from a repository or
+      # organisation secret, as every Gerrit verify caller in the
+      # estate does. gerrit_to_platform dispatches them on every
+      # patchset, and a deployment environment with protection rules
+      # would hold each vote for a human, which defeats a required
+      # verify; one without rules adds nothing this audit asks for.
+      #
+      # Line-scoped like the placeholders above, and for the same
+      # reason: a new secret reference elsewhere in these files is
+      # still reported. Configured here rather than inline, so a
+      # consumer copying the example inherits no suppression.
+      - gerrit.yaml:112
+      - gerrit.yaml:168
+      - gerrit-info-yaml-only.yaml:112
+      - gerrit-info-yaml-only.yaml:167
