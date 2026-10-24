@@ -234,7 +234,21 @@ release SHA.
 
 ### Concurrency
 
-Set the concurrency group in the caller. Two details matter:
+Set the concurrency group in the caller. Use a **literal** group,
+`cancel-in-progress: false` and `queue: max`, as the example does:
+
+<!-- markdownlint-disable MD013 -->
+
+```yaml
+concurrency:
+  group: 'autolabeler-${{ github.event_name }}-pr-${{ github.event.pull_request.number }}'
+  cancel-in-progress: false
+  queue: max
+```
+
+<!-- markdownlint-enable MD013 -->
+
+Two details of the group key matter:
 
 - Keep `github.event_name` in the key. The workflow triggers on both
   `pull_request` and `pull_request_target` for the same pull request,
@@ -243,10 +257,27 @@ Set the concurrency group in the caller. Two details matter:
   `pull_request_target`, `github.ref` resolves to the base branch, which
   would collapse every open pull request into a single group.
 
-`cancel-in-progress: true` suits this lane, unlike the semantic pull
-request check. Labelling is idempotent and publishes no check run that
-a ruleset evaluates, so a superseded run leaves nothing behind for the
-merge box to report.
+Do not cancel in-progress runs. The lane triggers on `edited`, and
+editing a pull request's title and then its body fires back-to-back
+events for the same head commit. With `cancel-in-progress: true`, those
+edits leave a cancelled check run beside a successful one for that
+commit. This check can be a **required** one: the organisation's
+mandatory-workflows ruleset may inject it, and a repository may make
+`Label PR` a required status check. Wherever a ruleset requires it,
+evaluation blocks on the cancelled run and the merge stays blocked
+even though labelling succeeded.
+
+`cancel-in-progress: false` alone is not enough. The default
+`queue: single` protects the run in flight and nothing else: a third
+event cancels the pending run to take its place. `queue: max` holds up
+to 100 pending runs and processes them in order. The two keys are
+complementary; `queue: max` combined with `cancel-in-progress: true` is
+a validation error. Labelling is idempotent and takes seconds, so
+running every superseded event costs almost nothing.
+
+Note that `actionlint` does not yet recognise the `queue` key and will
+report it as unexpected. GitHub documents the key, so scope an ignore
+rather than drop it.
 
 ## Gerrit support
 
