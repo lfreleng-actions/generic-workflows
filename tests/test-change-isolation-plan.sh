@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 #
-# Fixtures for the plan and report logic in
+# Fixtures for the Gerrit endpoint, plan and report logic in
 # .github/workflows/change-isolation.yaml.
 #
 # The plan decides which files a change touches and which checks run
@@ -11,7 +11,7 @@
 # turns a failure into a pass would let a change through a policy it
 # breaks, and nobody investigates a green check.
 #
-# Both scripts are EXTRACTED from the workflow rather than copied
+# The scripts are EXTRACTED from the workflow rather than copied
 # here, so there is one implementation and these fixtures always
 # exercise the code that runs in CI. Removing or renaming the markers
 # in the workflow fails this script rather than silently testing
@@ -64,18 +64,20 @@ extract() {
 
 plan_script="${workdir}/plan.py"
 report_script="${workdir}/report.py"
+gerrit_script="${workdir}/gerrit.py"
 extract change_isolation_plan "${plan_script}" 'def changed_paths'
 extract change_isolation_report "${report_script}" 'def evaluate'
+extract change_isolation_gerrit "${gerrit_script}" 'def endpoint'
 
-# Both scripts read their input from the checkout of the change under
-# test, so they must keep running isolated. Match the command line,
-# anchored, rather than any mention in a comment.
+# The scripts read caller input, and the plan and report the checkout
+# of the change under test, so they must keep running isolated. Match
+# the command line, anchored, rather than any mention in a comment.
 isolated_runs=$(grep -cE "^[[:space:]]*python3 -I - <<'PYEOF'\$" \
   "${workflow}" || true)
-if [ "${isolated_runs}" -ne 2 ]; then
-  echo 'ERROR: the plan and report scripts in' >&2
+if [ "${isolated_runs}" -ne 3 ]; then
+  echo 'ERROR: the Gerrit endpoint, plan and report scripts in' >&2
   echo "       ${workflow}" >&2
-  echo "       must both run as: python3 -I - <<'PYEOF'" >&2
+  echo "       must all run as: python3 -I - <<'PYEOF'" >&2
   exit 1
 fi
 
@@ -187,6 +189,111 @@ expect_output() {
 actual:   ${actual}"
   fi
 }
+
+# --- Gerrit endpoint ------------------------------------------------
+
+# run_gerrit <url> [project] [branch]: sets gerrit_rc, gerrit_log and
+# gerrit_out.
+run_gerrit() {
+  gerrit_out="${workdir}/gerrit-output-${RANDOM}"
+  : > "${gerrit_out}"
+  gerrit_rc=0
+  gerrit_log=$(GERRIT_URL="$1" GERRIT_PROJECT="${2-project}" \
+    GERRIT_BRANCH="${3-main}" GITHUB_OUTPUT="${gerrit_out}" \
+    python3 -I "${gerrit_script}" 2>&1) || gerrit_rc=$?
+}
+
+# expect_endpoint <url> <expected host:port>
+expect_endpoint() {
+  local actual
+  run_gerrit "$1"
+  actual=$(read_output_line "${gerrit_out}" endpoint)
+  if [ "${gerrit_rc}" -eq 0 ] && [ "${actual}" = "$2" ]; then
+    pass
+  else
+    fail "endpoint of $1: expected $2, got '${actual}'" "${gerrit_log}"
+  fi
+}
+
+# expect_gerrit_error <label> <substring of the expected message>
+expect_gerrit_error() {
+  local label="$1" message="$2"
+  if [ "${gerrit_rc}" -eq 0 ]; then
+    fail "${label}: resolver passed, expected an error" "${gerrit_log}"
+  elif ! grep -qF -- "${message}" <<< "${gerrit_log}"; then
+    fail "${label}: no '${message}' in the error" "${gerrit_log}"
+  elif [ -s "${gerrit_out}" ]; then
+    fail "${label}: a failed resolver wrote outputs" \
+      "$(cat "${gerrit_out}")"
+  else
+    pass
+  fi
+}
+
+# Print one 'name=value' output.
+read_output_line() {
+  sed -n "s/^$2=//p" "$1"
+}
+
+expect_endpoint 'https://gerrit.example.org' 'gerrit.example.org:443'
+expect_endpoint 'https://gerrit.example.org/' 'gerrit.example.org:443'
+expect_endpoint 'https://Gerrit.Example.ORG/r/' 'gerrit.example.org:443'
+expect_endpoint 'https://gerrit.example.org:8443/r' 'gerrit.example.org:8443'
+expect_endpoint 'HTTPS://gerrit.example.org' 'gerrit.example.org:443'
+expect_endpoint 'https://gerrit-1.example.org:0443' 'gerrit-1.example.org:443'
+
+run_gerrit 'http://gerrit.example.org'
+expect_gerrit_error 'http scheme' 'must start with https://'
+run_gerrit 'ssh://gerrit.example.org:29418'
+expect_gerrit_error 'ssh scheme' 'must start with https://'
+run_gerrit 'gerrit.example.org'
+expect_gerrit_error 'no scheme' 'must start with https://'
+run_gerrit 'https://user@gerrit.example.org'
+expect_gerrit_error 'userinfo' 'no user information'
+run_gerrit 'https://user:pass@gerrit.example.org'
+expect_gerrit_error 'userinfo with password' 'no user information'
+run_gerrit 'https://gerrit.example.org:0'
+expect_gerrit_error 'port zero' 'invalid port'
+run_gerrit 'https://gerrit.example.org:65536'
+expect_gerrit_error 'port too large' 'invalid port'
+run_gerrit 'https://gerrit.example.org:'
+expect_gerrit_error 'empty port' 'invalid port'
+run_gerrit 'https://gerrit.example.org:443x'
+expect_gerrit_error 'non-numeric port' 'invalid port'
+run_gerrit 'https://'
+expect_gerrit_error 'no host' 'invalid hostname'
+run_gerrit 'https:///r'
+expect_gerrit_error 'empty host' 'invalid hostname'
+run_gerrit 'https://gerrit_x.example.org'
+expect_gerrit_error 'underscore' 'invalid hostname'
+run_gerrit 'https://-gerrit.example.org'
+expect_gerrit_error 'leading hyphen' 'invalid hostname'
+run_gerrit 'https://gerrit..example.org'
+expect_gerrit_error 'empty label' 'invalid hostname'
+run_gerrit 'https://gerrit.example.org.'
+expect_gerrit_error 'trailing dot' 'invalid hostname'
+run_gerrit "https://$(printf 'a%.0s' {1..64}).example.org"
+expect_gerrit_error 'label too long' 'invalid hostname'
+run_gerrit 'https://[::1]:8443'
+expect_gerrit_error 'IPv6 literal' 'invalid'
+run_gerrit 'https://gerrit.example.org/r?x=1'
+expect_gerrit_error 'query' 'no query or fragment'
+run_gerrit 'https://gerrit.example.org/r#x'
+expect_gerrit_error 'fragment' 'no query or fragment'
+run_gerrit 'https://gerrit.example.org?'
+expect_gerrit_error 'empty query' 'no query or fragment'
+run_gerrit 'https://gerrit.example.org /r'
+expect_gerrit_error 'space' 'whitespace'
+run_gerrit "$(printf 'https://gerrit.example.org\n::warning::x')"
+expect_gerrit_error 'newline' 'control character'
+run_gerrit 'https://gerrït.example.org'
+expect_gerrit_error 'non-ASCII host' 'non-ASCII'
+
+run_gerrit 'https://gerrit.example.org' '' ''
+expect_gerrit_error 'project and branch missing' \
+  'missing: gerrit_project gerrit_branch'
+run_gerrit '' 'project' 'main'
+expect_gerrit_error 'URL missing' 'missing: gerrit_url/GERRIT_URL'
 
 two_checks='[
   {"name": "INFO.yaml", "paths": "/INFO.yaml"},

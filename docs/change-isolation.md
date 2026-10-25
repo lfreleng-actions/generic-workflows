@@ -24,15 +24,25 @@ wants one of them no longer inherits the other.
 ## Job graph
 
 ```text
-plan ──► Isolation: <check 1>   (matrix, one leg per check, no checkout) ──┐
-    ├──► Isolation: <check n>                                             ├──► report
-    └──► INFO.yaml                (when the change touches it)            ┘
+[gerrit] ──► plan ──► Isolation: <check 1>   (matrix, one leg per check, no checkout) ──┐
+                 ├──► Isolation: <check n>                                             ├──► report
+                 └──► INFO.yaml                (when the change touches it)            ┘
 ```
 
-1. `plan` checks the change out at depth 2, lists the files it touches
+1. `gerrit` (shown as `Gerrit endpoint`) runs in Gerrit mode, with
+   `gerrit_refspec` set. It requires the Gerrit project, branch and
+   URL, and derives the one Gerrit endpoint `plan` may reach (see
+   [Network egress](#network-egress)), so Gerrit mode fails before
+   any job checks the change out. Without a refspec the workflow
+   skips the job, which costs no runner, and `plan` runs anyway.
+2. `plan` checks the change out at depth 2, lists the files it touches
    with `git diff --no-renames`, validates `checks`, and works out
-   what the change does to `INFO.yaml`.
-2. `Isolation: <name>` runs once per check.
+   what the change does to `INFO.yaml`. When the `INFO.yaml` job is
+   due, it uploads that file, and `.gitreview` when it exists and
+   `gerrit_project` is empty, as artifact
+   `change-isolation-info-yaml-<key>` (one-day retention), and
+   refuses a symlink in place of either file.
+3. `Isolation: <name>` runs once per check.
    [`change-isolation-action`](https://github.com/lfreleng-actions/change-isolation-action)
    receives the plan's file list through its `changed-files` input, so
    no leg checks anything out. `fail-fast` is off: every policy reports.
@@ -41,15 +51,16 @@ plan ──► Isolation: <check 1>   (matrix, one leg per check, no checkout) �
    the plan's number for the check, never the caller's check name,
    and the key is a random token the plan draws per call, keeping two
    calls in one run apart.
-3. `INFO.yaml` runs when `info_yaml_validate` is on and the change
+4. `INFO.yaml` runs when `info_yaml_validate` is on and the change
    touches the file. A changed file goes through
    [`info-yaml-validate-action`](https://github.com/lfreleng-actions/info-yaml-validate-action);
-   a removed one fails before it. Without a Gerrit refspec, the job
-   checks out the exact commit `plan` listed files for, so a `ref`
-   that moves between the jobs cannot change what it validates. When the change leaves the file
-   alone, the job shows as skipped, which reads in the run as
-   "INFO.yaml not touched".
-4. `report` runs whatever happened before it, collects the result
+   a removed one fails before it. The job checks nothing out: it
+   downloads the artifact `plan` uploaded into the workspace at the
+   same relative paths, so it validates the revision `plan`
+   listed files for, and a run fetches the change once. When the
+   change leaves the file alone, the job shows as skipped, which reads
+   in the run as "INFO.yaml not touched".
+5. `report` runs whatever happened before it, collects the result
    artifacts, writes a step-summary table and sets the `results`
    output.
 
@@ -57,7 +68,8 @@ Adding a check adds one parallel leg, not serial time.
 
 ### What the report fails on
 
-- the `plan` job failed;
+- the `plan` job did not succeed, including when a failed `gerrit`
+  job left it skipped;
 - a check that is not advisory found the change not isolated;
 - a planned check left **no** result, or one the report cannot read:
   a missing result never counts as a pass;
@@ -115,11 +127,12 @@ mirrors the `plan` input of `linting.yaml` on purpose.
 | `gerrit_url`              | `string`  | `''`              | Gerrit URL; falls back to the `GERRIT_URL` variable                  |
 | `runs_on`                 | `string`  | `ubuntu-latest`   | Linux runner harden-runner supports; not `ubuntu-slim`               |
 | `timeout_minutes`         | `number`  | `10`              | Timeout for each isolation leg and the `INFO.yaml` job               |
-| `harden_runner_egress`    | `string`  | `block`           | `block` or `audit`                                                   |
-| `harden_runner_allowlist` | `string`  | `.github` v0.17.2 | Out-of-band allow-list coordinate                                    |
+| `harden_runner_egress`    | `string`  | `block`           | `block` or `audit`; see [Network egress](#network-egress)            |
 
 With `gerrit_refspec` set, `gerrit_project`, `gerrit_branch` and a
-Gerrit URL are mandatory, and the plan fails without them. With
+Gerrit URL are mandatory, and the `gerrit` job fails without them.
+The URL must be a plain `https://` URL; see
+[Network egress](#network-egress). With
 `gerrit_project` empty, `info-yaml-validate-action` reads the project
 from `.gitreview`.
 
@@ -194,21 +207,59 @@ every project.
 
 ## Security notes
 
-- `plan` and `INFO.yaml` are the jobs that check the change out,
-  with read access and without persisted credentials on the GitHub
-  path. The isolation legs and `report` hold no repository permission
-  at all.
-- The plan and report scripts run as `python3 -I`, so a module in the
+- `plan` is the one job that checks the change out, with read access
+  and without persisted credentials on the GitHub path. The
+  `gerrit`, isolation, `INFO.yaml` and `report` jobs hold no
+  repository permission at all.
+- The Gerrit endpoint, plan and report scripts run as `python3 -I`, so a module in the
   checkout cannot replace one they import. The plan runs `git diff`
   with `--no-ext-diff` and `--no-textconv`, and with
   `--ignore-submodules=none`, so an `ignore` setting in the change's
   `.gitmodules` cannot hide a submodule bump from the file list.
 - All variable data reaches `run:` blocks through `env:`, and every
   `uses:` pins a commit SHA.
-- Each job loads the organisation allow-list and runs harden-runner;
-  `harden_runner_egress` defaults to `block`.
+- Each job starts with harden-runner and, by default, blocks every
+  host it does not need; see [Network egress](#network-egress).
 - Lines the plan prints about paths and names carry a prefix, so a
   path cannot start a line with `::` and act as a workflow command.
+
+## Network egress
+
+Every job's first step is `step-security/harden-runner`, in block mode
+unless `harden_runner_egress` is `audit`, with an allow-list of its
+own. No job loads the organisation's shared allow-list.
+
+| Job                    | `allowed-endpoints`                                                                                                       |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `gerrit` (Gerrit mode) | `github.com:443`                                                                                                          |
+| `plan`                 | `github.com:443`, plus the Gerrit endpoint in Gerrit mode                                                                 |
+| `Isolation: <name>`    | `github.com:443`, `raw.githubusercontent.com:443`, `releases.astral.sh:443`, `pypi.org:443`, `files.pythonhosted.org:443` |
+| `INFO.yaml`            | `github.com:443`, `raw.githubusercontent.com:443`, `releases.astral.sh:443`, `pypi.org:443`, `files.pythonhosted.org:443` |
+| `report`               | `github.com:443`                                                                                                          |
+
+- harden-runner always allows GitHub's own endpoints in block mode,
+  so checkouts from GitHub and artifact upload and download need no
+  entry. Each list names `github.com:443` anyway: harden-runner
+  v2.22.2 warns whenever block mode meets an empty list.
+- The four hosts after `github.com` serve the `uv`, `pathspec` and
+  schema-validation installs that `change-isolation-action` and
+  `info-yaml-validate-action` make at run time. The isolation legs
+  drop them once the `change-isolation-action` pin moves to the
+  release containing lfreleng-actions/change-isolation-action#88.
+- In block mode, `disable-telemetry` is on, since the telemetry host
+  is not on any list.
+- In Gerrit mode, the `gerrit` job reads `gerrit_url`, or the
+  `GERRIT_URL` variable when that is empty, and hands `plan` the
+  server's `host:port` as a job output: harden-runner reads
+  `allowed-endpoints` when a job starts, so a step output would arrive
+  too late. An `https://` URL without a port maps to port 443, and an
+  explicit port stands. The job fails, naming the problem, on any other
+  scheme, user information, a query or fragment, an invalid port, or
+  a hostname that is not plain ASCII letters, digits, hyphens and
+  dots.
+
+Set `harden_runner_egress: audit` to diagnose a blocked connection:
+the jobs then log egress without blocking it.
 
 ## Migration
 
@@ -255,10 +306,10 @@ alone.
 
 ## Testing
 
-`tests/test-change-isolation-plan.sh` extracts the plan and report
-scripts from between their `BEGIN`/`END` markers and runs them against
-throwaway git repositories and result files: valid and invalid
-`checks`, renames, `INFO.yaml` modified, removed and renamed away, an
+`tests/test-change-isolation-plan.sh` extracts the Gerrit endpoint,
+plan and report scripts from between their `BEGIN`/`END` markers and
+runs them against Gerrit URLs, throwaway git repositories and result
+files: accepted and rejected Gerrit URLs, valid and invalid `checks`, renames, `INFO.yaml` modified, removed and renamed away, an
 empty change, control characters in paths, violations, advisory
 violations and missing results. The `change-isolation-fixtures` prek
 hook runs it whenever the workflow or the script changes.
