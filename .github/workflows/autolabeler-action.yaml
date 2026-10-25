@@ -76,10 +76,21 @@ permissions: {}
 # github.ref cannot replace the pull request number either, because on
 # pull_request_target it resolves to the base branch and would serialise
 # every open pull request into one group.
+#
+# Never cancel, and queue rather than replace: a cancelled check run
+# sitting beside a successful one for the same head SHA blocks ruleset
+# evaluation wherever the check is a required one, as the copy the
+# mandatory-workflows ruleset injects is. This caller models what
+# consumers copy, so it follows the same rule. The 'edited' trigger
+# makes such bursts common. 'queue: max' covers a burst,
+# because the default 'single' queue cancels the pending run when a
+# third event arrives. Labelling is idempotent and takes seconds, so
+# running every event costs almost nothing.
 concurrency:
   # yamllint disable-line rule:line-length
   group: 'autolabeler-self-${{ github.event_name }}-pr-${{ github.event.pull_request.number }}'
-  cancel-in-progress: true
+  cancel-in-progress: false
+  queue: max
 
 jobs:
   autolabel:
