@@ -54,7 +54,7 @@ rules:
       - github.yaml:59
       - github.yaml:90
       - github.yaml:83
-      - github.yaml:96
+      - github.yaml:103
 
   stale-action-refs:
     ignore:
@@ -80,7 +80,7 @@ rules:
       - github.yaml:59
       - github.yaml:90
       - github.yaml:83
-      - github.yaml:96
+      - github.yaml:103
 
   secrets-outside-env:
     ignore:

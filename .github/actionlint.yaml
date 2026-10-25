@@ -6,6 +6,9 @@
 paths:
   .github/workflows/autolabeler-action.yaml:
     ignore:
+      # Same 'queue' concurrency key as the semantic pull request
+      # caller below; see that comment.
+      - 'unexpected key "queue" for "concurrency" section'
       # GitHub's self-repository reference ('$/', July 2026) resolves
       # this repository at the commit already running, and is now the
       # recommended way to call a sibling workflow. actionlint does not
@@ -112,5 +115,11 @@ paths:
   # semantic-pull-request sibling: it carries the same concurrency
   # block and is linted now that the hook covers examples/.
   examples/linting/github.yaml:
+    ignore:
+      - 'unexpected key "queue" for "concurrency" section'
+
+  # The autolabeler example caller carries the same concurrency block
+  # as its self-caller, so it needs the same ignore.
+  examples/autolabeler/github.yaml:
     ignore:
       - 'unexpected key "queue" for "concurrency" section'
