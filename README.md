@@ -379,6 +379,43 @@ See [`docs/autolabeler.md`](docs/autolabeler.md) for the full
 input/secret reference, the trigger routing table, and the migration
 notes.
 
+## Change isolation reusable workflow
+
+[`.github/workflows/change-isolation.yaml`](.github/workflows/change-isolation.yaml)
+checks that a change keeps sensitive files apart from everything else.
+The caller lists its isolation policies as data in `checks`; each runs
+as its own `Isolation: <name>` job, in parallel. When the change
+touches `INFO.yaml`, a separate job validates it, and deleting the
+file fails. A `report` job folds every result into one outcome. The
+workflow replaces the two Gerrit change isolation workflows in
+`lfit/releng-reusable-workflows`.
+
+```yaml
+jobs:
+  change-isolation:
+    name: 'Change Isolation'
+    permissions:
+      contents: read
+    # Pin a real generic-workflows release SHA in place of <SHA>.
+    uses: lfreleng-actions/generic-workflows/.github/workflows/change-isolation.yaml@<SHA>
+    with:
+      checks: |
+        [
+          {"name": "INFO.yaml", "paths": "/INFO.yaml"},
+          {"name": "CI/CD", "paths": ".github/**"}
+        ]
+      gerrit_refspec: ${{ inputs.GERRIT_REFSPEC }}
+      gerrit_project: ${{ inputs.GERRIT_PROJECT }}
+      gerrit_branch: ${{ inputs.GERRIT_BRANCH }}
+```
+
+The reusable casts no vote: the caller clears and sets it around the
+call, so the Gerrit SSH key never reaches the reusable. Copy a caller
+from [`examples/change-isolation/`](examples/change-isolation/), and
+see [`docs/change-isolation.md`](docs/change-isolation.md) for the
+`checks` format, the inputs and outputs, the rename and deletion
+rules, and the migration from the legacy workflows.
+
 ## Caller filenames
 
 A consuming repository names its callers after the reusable it calls:
@@ -386,17 +423,20 @@ A consuming repository names its callers after the reusable it calls:
 `clear-action-cache.yaml` and `autolabeler.yaml`. The callers in this
 repository carry an `-action` suffix (`release-action.yaml`,
 `semantic-pull-request-action.yaml`, `linting-action.yaml`,
-`clear-action-cache-action.yaml`, `autolabeler-action.yaml`) because a
-caller here cannot share a filename with the reusable it calls. Do not
-copy that suffix into a consuming repository.
+`clear-action-cache-action.yaml`, `autolabeler-action.yaml`,
+`change-isolation-action.yaml`) because a caller here cannot share a
+filename with the reusable it calls. Do not copy that suffix into a
+consuming repository. Gerrit verify callers, such as the change
+isolation examples, follow gerrit_to_platform's naming instead: the
+filename must contain both `gerrit` and `verify`.
 
 ## Gerrit support
 
-Gerrit-mirrored projects use these workflows unchanged. None of the
-reusables here takes Gerrit *checkout* inputs, and none performs a dual
-checkout. The release reusable keeps `require_gerrit`, which verifies a
-tag's signing key against a Gerrit account and has nothing to do with
-checkout.
+Gerrit-mirrored projects use these workflows unchanged. Apart from
+change isolation, none of the reusables here takes Gerrit *checkout*
+inputs, and none performs a dual checkout. The release reusable keeps
+`require_gerrit`, which verifies a tag's signing key against a Gerrit
+account and has nothing to do with checkout.
 
 That deviates from the sibling reusables in `python-workflows`,
 `node-workflows` and the rest, which run per patchset. Those accept a
@@ -419,6 +459,12 @@ read. The autolabeler is out for the same reason, having no pull
 request to label. The linting reusable takes no Gerrit checkout
 inputs; a Gerrit project calls it from a `push` trigger on the mirror.
 
+Change isolation is the exception, because it runs per patchset:
+gerrit_to_platform dispatches its caller for each change, and the
+reusable checks that change out with `checkout-gerrit-change-action`
+whenever the caller passes `gerrit_refspec`, and falls back to a normal
+checkout otherwise.
+
 ## Design
 
 See [`docs/release.md`](docs/release.md) for the release reusable
@@ -426,8 +472,9 @@ workflow's full input/output reference and job graph,
 [`docs/semantic-pull-request.md`](docs/semantic-pull-request.md) for
 the semantic pull request reusable workflow, and
 [`docs/linting.md`](docs/linting.md) for the linting reusable
-workflow, and [`docs/autolabeler.md`](docs/autolabeler.md) for the
-autolabeler.
+workflow, [`docs/autolabeler.md`](docs/autolabeler.md) for the
+autolabeler, and [`docs/change-isolation.md`](docs/change-isolation.md)
+for change isolation.
 
 [pre-commit.ci results page]: https://results.pre-commit.ci/latest/github/lfreleng-actions/generic-workflows/main
 [pre-commit.ci status badge]: https://results.pre-commit.ci/badge/github/lfreleng-actions/generic-workflows/main.svg

@@ -1,0 +1,977 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Reusable change isolation workflow.
+#
+#   plan --> Isolation: <check 1>  (matrix, no checkout) --+
+#        +-> Isolation: <check n>                         +--> report
+#        +-> INFO.yaml  (only when the change touches it) -+
+#
+# Each isolation policy is DATA: the caller lists the checks it wants
+# in 'checks', and every check runs as its own named job, in parallel.
+# A check passes when the change either touches none of its paths or
+# touches nothing else. INFO.yaml validation runs as a separate job,
+# and only when the change touches that file; deleting it, or renaming
+# it away, fails. The 'report' job folds every result into the one
+# outcome the caller votes on.
+#
+# Replaces gerrit-compose-required-change-isolation-verify.yaml and
+# gerrit-compose-required-info-yaml-verify.yaml in
+# lfit/releng-reusable-workflows. See docs/change-isolation.md.
+#
+# Security posture:
+#   * The reusable casts no vote and holds no Gerrit SSH key; voting
+#     stays in the caller.
+#   * One job checks the change out to list the files it touches; the
+#     isolation legs receive that list and check nothing out. Only
+#     the INFO.yaml job reads the tree again, to validate the file.
+#   * All variable data reaches 'run' blocks through 'env', never
+#     through expression interpolation.
+#   * Fails closed: an unreachable parent, an empty change, a path the
+#     list cannot carry, a planned check without a result, a skipped
+#     INFO.yaml job that should have run: each fails the run.
+name: '[R] Change Isolation 🔒'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_call:
+    inputs:
+      checks:
+        description: >-
+          JSON array of isolation checks, each an object with 'name'
+          (non-empty, unique; the job is named 'Isolation: <name>'),
+          'paths' (gitignore-style patterns, as a newline-separated
+          string or an array of strings) and an optional boolean
+          'advisory' (report a violation without failing).
+        required: true
+        type: string
+      info_yaml_validate:
+        description: >-
+          Validate INFO.yaml in its own job when the change touches
+          it. A change that deletes or renames it away fails.
+        required: false
+        type: boolean
+        default: true
+      info_yaml_path:
+        description: >-
+          Root-relative path of the INFO.yaml file; also the path
+          whose change triggers the INFO.yaml job.
+        required: false
+        type: string
+        default: 'INFO.yaml'
+
+      # --- Checkout target (defaults to the calling repository) ---
+      repository:
+        description: 'Repository to check out (owner/name); empty = caller'
+        required: false
+        type: string
+        default: ''
+      ref:
+        description: >-
+          Branch, tag or SHA to check out when no Gerrit refspec is
+          set; empty checks out the commit that triggered the run.
+        required: false
+        type: string
+        default: ''
+
+      # --- Gerrit-aware checkout (empty unless dispatched via Gerrit) ---
+      gerrit_refspec:
+        description: 'Gerrit refspec of the change under test'
+        required: false
+        type: string
+        default: ''
+      gerrit_project:
+        description: >-
+          Gerrit project name; also the project INFO.yaml must
+          describe (empty reads it from .gitreview)
+        required: false
+        type: string
+        default: ''
+      gerrit_branch:
+        description: 'Gerrit branch the change targets'
+        required: false
+        type: string
+        default: ''
+      gerrit_url:
+        description: 'Gerrit server URL (falls back to the GERRIT_URL variable)'
+        required: false
+        type: string
+        default: ''
+
+      # --- Runner selection and timeout ---
+      runs_on:
+        description: >-
+          Runner label for all jobs. Must name a Linux runner that
+          harden-runner can monitor, which rules out 'ubuntu-slim'.
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+      timeout_minutes:
+        description: 'Timeout (minutes) for each isolation and INFO.yaml job'
+        required: false
+        type: number
+        default: 10
+
+      # --- Runner hardening ---
+      harden_runner_egress:
+        description: "Harden-runner egress policy: 'block' or 'audit'"
+        required: false
+        type: string
+        default: 'block'
+      harden_runner_allowlist:
+        description: 'Out-of-band harden-runner allow-list configuration'
+        required: false
+        type: string
+        # yamllint disable-line rule:line-length
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@084d6861688632b2edb6bde3c180145bebf9cc7a'  # v0.17.2
+
+    secrets:
+      token:
+        description: >-
+          Token used to check out 'repository'; defaults to the job's
+          GITHUB_TOKEN. Supply one with read access when the target
+          is private, since GITHUB_TOKEN reaches the caller alone.
+        required: false
+
+    outputs:
+      changed_files:
+        description: >-
+          Newline-separated list of the paths the change touches, as
+          git reports them with rename detection off.
+        value: ${{ jobs.plan.outputs.changed_files }}
+      info_yaml_state:
+        description: >-
+          What the change does to INFO.yaml: 'untouched', 'changed'
+          or 'removed'.
+        value: ${{ jobs.plan.outputs.info_yaml_state }}
+      results:
+        description: >-
+          JSON array with one object per check: 'name', 'advisory',
+          'triggered', 'isolated' and 'violating_files'.
+        value: ${{ jobs.report.outputs.results }}
+
+permissions: {}
+
+# No concurrency block, deliberately: concurrency belongs to the
+# caller, which knows the change it runs for. See
+# examples/change-isolation/ for the recommended group.
+
+jobs:
+  plan:
+    name: 'Plan'
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      has_work: ${{ steps.plan.outputs.has_work }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      changed_files: ${{ steps.plan.outputs.changed_files }}
+      info_yaml_state: ${{ steps.plan.outputs.info_yaml_state }}
+      head_sha: ${{ steps.plan.outputs.head_sha }}
+      run_key: ${{ steps.plan.outputs.run_key }}
+    steps:
+      - name: 'Load harden-runner allow-list'
+        # Only 'block' uses the list, so under 'audit' an outage must
+        # not fail the job. A step 'if:' cannot skip the loader: its
+        # 'pre' entry has no 'pre-if'.
+        continue-on-error: ${{ inputs.harden_runner_egress == 'audit' }}
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Require Gerrit project, branch and URL'
+        if: inputs.gerrit_refspec != ''
+        env:
+          GERRIT_PROJECT: ${{ inputs.gerrit_project }}
+          GERRIT_BRANCH: ${{ inputs.gerrit_branch }}
+          # yamllint disable-line rule:line-length
+          GERRIT_URL: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+        run: |
+          # Require Gerrit project, branch and URL
+          set -euo pipefail
+          missing=''
+          if [ -z "${GERRIT_PROJECT}" ]; then
+            missing="${missing} gerrit_project"
+          fi
+          if [ -z "${GERRIT_BRANCH}" ]; then
+            missing="${missing} gerrit_branch"
+          fi
+          if [ -z "${GERRIT_URL}" ]; then
+            missing="${missing} gerrit_url/GERRIT_URL"
+          fi
+          if [ -n "${missing}" ]; then
+            echo "::error::gerrit_refspec is set but missing:${missing}"
+            exit 1
+          fi
+          echo 'Gerrit inputs present ✅'
+
+      # Depth 2 so the change's parent is reachable: the file list is
+      # the diff against it.
+      - name: 'Checkout Gerrit change'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        with:
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          fetch-depth: '2'
+          # The action defaults this to github.repository, which inside
+          # a reusable workflow names the caller rather than the
+          # project under review.
+          repository: ${{ inputs.repository || github.repository }}
+          ref: refs/heads/${{ inputs.gerrit_branch }}
+          token: ${{ secrets.token || github.token }}
+      - name: 'Checkout repository'
+        if: inputs.gerrit_refspec == ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref }}
+          fetch-depth: 2
+          persist-credentials: false
+          token: ${{ secrets.token || github.token }}
+
+      - name: 'Plan checks'
+        id: plan
+        env:
+          INPUT_CHECKS: ${{ inputs.checks }}
+          INPUT_INFO_YAML_PATH: ${{ inputs.info_yaml_path }}
+        run: |
+          # Plan checks
+          set -euo pipefail
+          # '-I' keeps the checkout, which is the change under test,
+          # off sys.path: the script arrives on stdin, so the current
+          # directory would otherwise be searched for its imports.
+          # tests/test-change-isolation-plan.sh extracts the script
+          # between the BEGIN and END markers.
+          python3 -I - <<'PYEOF'
+          # BEGIN change_isolation_plan
+          import json
+          import os
+          import posixpath
+          import secrets
+          import subprocess
+          import sys
+
+          CHECK_KEYS = {"name", "paths", "advisory"}
+          MAX_NAME_LENGTH = 100
+          errors = []
+
+
+          def annotate(text):
+              return (
+                  text.replace("%", "%25")
+                  .replace("\r", "%0D")
+                  .replace("\n", "%0A")
+              )
+
+
+          def error(message):
+              errors.append(message)
+              print(f"::error::{annotate(message)}")
+
+
+          def has_control(text):
+              return any(
+                  ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F
+                  for char in text
+              )
+
+
+          def markdown(text):
+              for char in "\\`*_[]<>|#":
+                  text = text.replace(char, "\\" + char)
+              return text
+
+
+          def parse_paths(where, paths):
+              if isinstance(paths, str):
+                  patterns = paths.split("\n")
+              elif isinstance(paths, list) and all(
+                  isinstance(item, str) for item in paths
+              ):
+                  patterns = paths
+              else:
+                  error(
+                      f"{where}: 'paths' must be a newline-separated"
+                      " string or an array of strings"
+                  )
+                  return None
+              patterns = [item.strip() for item in patterns]
+              patterns = [item for item in patterns if item]
+              if not patterns:
+                  error(f"{where}: 'paths' names no pattern")
+                  return None
+              for item in patterns:
+                  if has_control(item):
+                      error(
+                          f"{where}: pattern {json.dumps(item)}"
+                          " contains a control character"
+                      )
+                      return None
+              return patterns
+
+
+          def parse_checks(raw):
+              try:
+                  checks = json.loads(raw)
+              except ValueError as exc:
+                  error(f"checks is not valid JSON: {exc}")
+                  return []
+              if not isinstance(checks, list):
+                  error("checks must be a JSON array of objects")
+                  return []
+              if not checks:
+                  error("checks must name at least one check")
+                  return []
+              plan = []
+              names = set()
+              for index, entry in enumerate(checks):
+                  where = f"checks[{index}]"
+                  if not isinstance(entry, dict):
+                      shown = json.dumps(entry)
+                      error(f"{where} must be an object, not {shown}")
+                      continue
+                  label = where
+                  name = entry.get("name")
+                  if isinstance(name, str) and name.strip():
+                      label = f"{where} ({json.dumps(name)})"
+                  unknown = sorted(set(entry) - CHECK_KEYS)
+                  if unknown:
+                      keys = ", ".join(json.dumps(key) for key in unknown)
+                      error(f"{label}: unknown key(s) {keys}")
+                  if not isinstance(name, str) or not name.strip():
+                      error(f"{where}: 'name' must be a non-empty string")
+                      name = None
+                  elif (
+                      name != name.strip()
+                      or has_control(name)
+                      or len(name) > MAX_NAME_LENGTH
+                  ):
+                      error(
+                          f"{label}: 'name' must have no control characters"
+                          " or surrounding whitespace, and at most"
+                          f" {MAX_NAME_LENGTH} characters"
+                      )
+                      name = None
+                  elif name in names:
+                      error(f"{label}: duplicate name")
+                  else:
+                      names.add(name)
+                  advisory = entry.get("advisory", False)
+                  if not isinstance(advisory, bool):
+                      error(f"{label}: 'advisory' must be true or false")
+                  if "paths" not in entry:
+                      error(f"{label}: 'paths' is required")
+                      patterns = None
+                  else:
+                      patterns = parse_paths(label, entry["paths"])
+                  if name is not None and patterns is not None:
+                      plan.append(
+                          {
+                              # A stable numeric id names the result
+                              # artifact; the caller's name never does.
+                              "id": index + 1,
+                              "name": name,
+                              "paths": "\n".join(patterns),
+                              "advisory": advisory is True,
+                          }
+                      )
+              return plan
+
+
+          def check_info_path(path):
+              if (
+                  not path
+                  or path != path.strip()
+                  or has_control(path)
+                  or path.startswith("/")
+                  or posixpath.normpath(path) != path
+                  or path == "."
+                  or path.split("/")[0] == ".."
+              ):
+                  error(
+                      f"info_yaml_path {json.dumps(path)} must be a"
+                      " normalised path relative to the repository root"
+                  )
+                  return None
+              return path
+
+
+          def git_diff(*extra):
+              # '--no-renames' reports a rename as its old AND new
+              # path, so moving a file into an isolated scope cannot
+              # hide the file it deletes, and renaming INFO.yaml away
+              # reads as a removal. '--ignore-submodules=none' stops a
+              # '.gitmodules' in the change hiding a submodule bump.
+              command = [
+                  "git", "diff", "--no-ext-diff", "--no-textconv",
+                  "--ignore-submodules=none",
+                  "--name-only", "--no-renames", "-z", *extra,
+                  "HEAD~1", "HEAD", "--",
+              ]
+              result = subprocess.run(command, capture_output=True, check=False)
+              if result.returncode != 0:
+                  detail = result.stderr.decode("utf-8", "replace").strip()
+                  error(f"git diff against HEAD~1 failed: {detail}")
+                  return None
+              try:
+                  return [
+                      item.decode("utf-8")
+                      for item in result.stdout.split(b"\0")
+                      if item
+                  ]
+              except UnicodeDecodeError:
+                  error("git diff reported a path that is not valid UTF-8")
+                  return None
+
+
+          def changed_paths():
+              parent = subprocess.run(
+                  [
+                      "git", "rev-parse", "--verify", "--quiet",
+                      "HEAD~1^{commit}",
+                  ],
+                  capture_output=True,
+                  check=False,
+              )
+              if parent.returncode != 0:
+                  error(
+                      "the parent of HEAD (HEAD~1) is unreachable; the"
+                      " change cannot be diffed. Check out at least two"
+                      " commits."
+                  )
+                  return None, None
+              changed = git_diff()
+              removed = git_diff("--diff-filter=D")
+              if changed is None or removed is None:
+                  return None, None
+              if not changed:
+                  error("the change touches no files; nothing to isolate")
+                  return None, None
+              # The list travels newline-separated, and the isolation
+              # action strips whitespace around each entry: a path it
+              # would read differently from git is refused here.
+              unsafe = [
+                  path
+                  for path in changed
+                  if has_control(path) or path != path.strip()
+              ]
+              for path in unsafe:
+                  error(
+                      f"changed path {json.dumps(path)} contains a control"
+                      " character or surrounding whitespace"
+                  )
+              if unsafe:
+                  return None, None
+              return changed, set(removed)
+
+
+          def head_commit():
+              # The INFO.yaml job checks this exact commit out, so a
+              # branch or tag that moves between the jobs cannot have
+              # it validate a revision the plan never listed.
+              result = subprocess.run(
+                  ["git", "rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+                  capture_output=True,
+                  check=False,
+              )
+              sha = result.stdout.decode("ascii", "replace").strip()
+              if result.returncode != 0 or len(sha) != 40 or any(
+                  char not in "0123456789abcdef" for char in sha
+              ):
+                  error("cannot resolve HEAD to a commit SHA")
+                  return None
+              return sha
+
+
+          def write_output(handle, name, value):
+              delimiter = f"EOF_{secrets.token_hex(16)}"
+              handle.write(f"{name}<<{delimiter}\n{value}\n{delimiter}\n")
+
+
+          plan = parse_checks(os.environ.get("INPUT_CHECKS", ""))
+          info_path = check_info_path(
+              os.environ.get("INPUT_INFO_YAML_PATH", "")
+          )
+          changed, removed = changed_paths()
+          head = head_commit() if changed is not None else None
+
+          if errors:
+              print(f"Plan failed with {len(errors)} error(s) ❌")
+              sys.exit(1)
+
+          if info_path in removed:
+              info_state = "removed"
+          elif info_path in changed:
+              info_state = "changed"
+          else:
+              info_state = "untouched"
+
+          # Each line carries a prefix, so no path can start a line
+          # with '::' and be read as a workflow command.
+          print(f"Changed files ({len(changed)}):")
+          for path in changed:
+              print(f"  - {path}")
+          print(f"INFO.yaml ({info_path}): {info_state}")
+          print(f"Commit: {head}")
+          for check in plan:
+              mode = " (advisory)" if check["advisory"] else ""
+              print(f"  check {check['id']}: {check['name']}{mode}")
+
+          output = os.environ["GITHUB_OUTPUT"]
+          with open(output, "a", encoding="utf-8") as handle:
+              write_output(handle, "has_work", "true" if plan else "false")
+              write_output(
+                  handle,
+                  "matrix",
+                  json.dumps({"include": plan}, separators=(",", ":")),
+              )
+              write_output(handle, "changed_files", "\n".join(changed))
+              write_output(handle, "info_yaml_state", info_state)
+              write_output(handle, "head_sha", head)
+              # Names this call's result artifacts apart from those of
+              # any other call in the same run.
+              write_output(handle, "run_key", secrets.token_hex(8))
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as handle:
+                  handle.write("## Change isolation plan\n\n")
+                  handle.write(f"Changed files: {len(changed)}\n\n")
+                  handle.write(
+                      f"INFO.yaml (`{markdown(info_path)}`): {info_state}\n\n"
+                  )
+                  handle.write("| Check | Advisory |\n| --- | --- |\n")
+                  for check in plan:
+                      advisory = "yes" if check["advisory"] else "no"
+                      name = markdown(check["name"])
+                      handle.write(f"| {name} | {advisory} |\n")
+          print(f"Planned {len(plan)} check(s) ✅")
+          # END change_isolation_plan
+          PYEOF
+
+  isolation:
+    name: 'Isolation: ${{ matrix.name }}'
+    needs: plan
+    if: needs.plan.outputs.has_work == 'true'
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    # No checkout: the plan job hands over the file list.
+    permissions: {}
+    strategy:
+      # Every policy reports, whatever another one found.
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: 'Load harden-runner allow-list'
+        continue-on-error: ${{ inputs.harden_runner_egress == 'audit' }}
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Check isolation'
+        id: check
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/change-isolation-action@e3f14ac3bed7e5b402fe48bb2ab9fce83b268a77  # v0.3.0
+        with:
+          paths: ${{ matrix.paths }}
+          changed-files: ${{ needs.plan.outputs.changed_files }}
+          fail-on-violation: ${{ matrix.advisory && 'false' || 'true' }}
+
+      # A matrix leg cannot publish job outputs of its own (only the
+      # last leg's values survive), so each leg hands its result to
+      # the report job as an artifact named by the plan's numeric id.
+      - name: 'Record result'
+        if: always()
+        env:
+          CHECK_ID: ${{ matrix.id }}
+          CHECK_NAME: ${{ matrix.name }}
+          CHECK_ADVISORY: ${{ matrix.advisory }}
+          CHECK_OUTCOME: ${{ steps.check.outcome }}
+          CHECK_TRIGGERED: ${{ steps.check.outputs.triggered }}
+          CHECK_ISOLATED: ${{ steps.check.outputs.isolated }}
+          CHECK_VIOLATING: ${{ steps.check.outputs.violating-files }}
+        run: |
+          # Record result
+          set -euo pipefail
+          case "${CHECK_ID}" in
+            '' | *[!0-9]*)
+              echo '::error::The plan gave this check no numeric id'
+              exit 1
+              ;;
+          esac
+          dir="${RUNNER_TEMP}/change-isolation-result"
+          mkdir -p "${dir}"
+          jq -n \
+            --argjson id "${CHECK_ID}" \
+            --arg name "${CHECK_NAME}" \
+            --arg advisory "${CHECK_ADVISORY}" \
+            --arg outcome "${CHECK_OUTCOME}" \
+            --arg triggered "${CHECK_TRIGGERED}" \
+            --arg isolated "${CHECK_ISOLATED}" \
+            --arg violating "${CHECK_VIOLATING}" \
+            '{
+              id: $id,
+              name: $name,
+              advisory: ($advisory == "true"),
+              outcome: $outcome,
+              triggered: $triggered,
+              isolated: $isolated,
+              violating_files:
+                ($violating | split("\n") | map(select(length > 0)))
+            }' > "${dir}/${CHECK_ID}.json"
+      - name: 'Upload result'
+        if: always()
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          # yamllint disable-line rule:line-length
+          name: change-isolation-result-${{ needs.plan.outputs.run_key }}-${{ matrix.id }}
+          path: ${{ runner.temp }}/change-isolation-result/${{ matrix.id }}.json
+          retention-days: 1
+          if-no-files-found: error
+
+  info-yaml:
+    name: 'INFO.yaml'
+    needs: plan
+    # Skipped when the change leaves INFO.yaml alone, which reads in
+    # the run as "INFO.yaml not touched".
+    # yamllint disable-line rule:line-length
+    if: inputs.info_yaml_validate && needs.plan.outputs.has_work == 'true' && needs.plan.outputs.info_yaml_state != 'untouched'
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: 'Load harden-runner allow-list'
+        continue-on-error: ${{ inputs.harden_runner_egress == 'audit' }}
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      # INFO.yaml is mandatory in every Gerrit project, and
+      # committer-management automation reads it, so its deletion
+      # must never pass silently.
+      - name: 'Refuse INFO.yaml removal'
+        if: needs.plan.outputs.info_yaml_state != 'changed'
+        env:
+          INFO_YAML_PATH: ${{ inputs.info_yaml_path }}
+          INFO_YAML_STATE: ${{ needs.plan.outputs.info_yaml_state }}
+        run: |
+          # Refuse INFO.yaml removal
+          echo "::error::This change removes ${INFO_YAML_PATH}" \
+            "(state: ${INFO_YAML_STATE}). Every project must keep" \
+            "its INFO.yaml; restore the file."
+          exit 1
+
+      - name: 'Checkout Gerrit change'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        with:
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          repository: ${{ inputs.repository || github.repository }}
+          ref: refs/heads/${{ inputs.gerrit_branch }}
+          token: ${{ secrets.token || github.token }}
+      # The commit the plan listed files for, not 'ref' again: a branch
+      # or tag can move between the two jobs. A Gerrit patchset ref
+      # cannot, so the Gerrit checkout above repeats the plan's.
+      - name: 'Checkout repository'
+        if: inputs.gerrit_refspec == ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ needs.plan.outputs.head_sha }}
+          persist-credentials: false
+          token: ${{ secrets.token || github.token }}
+
+      - name: 'Validate INFO.yaml'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/info-yaml-validate-action@17a31b5b8539127fad32907bbb3d9a9b6caf6407  # v0.0.2
+        with:
+          path: ${{ inputs.info_yaml_path }}
+          project: ${{ inputs.gerrit_project }}
+
+  report:
+    name: 'Report'
+    needs: [plan, isolation, info-yaml]
+    if: always()
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      results: ${{ steps.report.outputs.results }}
+    steps:
+      - name: 'Load harden-runner allow-list'
+        continue-on-error: ${{ inputs.harden_runner_egress == 'audit' }}
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      # A download that finds nothing must not stop the report: a
+      # planned check without a result is a failure the report itself
+      # names.
+      - name: 'Download results'
+        if: needs.plan.outputs.has_work == 'true'
+        continue-on-error: true
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          # yamllint disable-line rule:line-length
+          pattern: change-isolation-result-${{ needs.plan.outputs.run_key }}-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/change-isolation-results
+
+      - name: 'Report'
+        id: report
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          ISOLATION_RESULT: ${{ needs.isolation.result }}
+          INFO_YAML_RESULT: ${{ needs.info-yaml.result }}
+          INFO_YAML_STATE: ${{ needs.plan.outputs.info_yaml_state }}
+          INFO_YAML_VALIDATE: ${{ inputs.info_yaml_validate }}
+          INFO_YAML_PATH: ${{ inputs.info_yaml_path }}
+          MATRIX: ${{ needs.plan.outputs.matrix }}
+          RESULTS_DIR: ${{ runner.temp }}/change-isolation-results
+        run: |
+          # Report
+          set -euo pipefail
+          # tests/test-change-isolation-plan.sh extracts the script
+          # between the BEGIN and END markers. '-I' as in the plan.
+          python3 -I - <<'PYEOF'
+          # BEGIN change_isolation_report
+          import json
+          import os
+          import secrets
+          import sys
+
+          FLAGS = ("true", "false")
+          failures = []
+          results = []
+          rows = []
+
+
+          def annotate(text):
+              return (
+                  text.replace("%", "%25")
+                  .replace("\r", "%0D")
+                  .replace("\n", "%0A")
+              )
+
+
+          def markdown(text):
+              for char in "\\`*_[]<>|#":
+                  text = text.replace(char, "\\" + char)
+              return text
+
+
+          def planned_checks(plan_result, raw):
+              if plan_result != "success":
+                  failures.append(
+                      f"The plan job did not succeed ({plan_result})"
+                  )
+                  return []
+              try:
+                  planned = json.loads(raw)["include"]
+              except (ValueError, KeyError, TypeError):
+                  failures.append("The plan job produced no readable matrix")
+                  return []
+              if not isinstance(planned, list) or not planned:
+                  failures.append("The plan job planned no checks")
+                  return []
+              return planned
+
+
+          def load_result(directory, check):
+              path = os.path.join(directory, f"{check['id']}.json")
+              try:
+                  with open(path, encoding="utf-8") as handle:
+                      data = json.load(handle)
+              except FileNotFoundError:
+                  return None, "left no result"
+              except (OSError, ValueError):
+                  return None, "left an unreadable result"
+              if (
+                  not isinstance(data, dict)
+                  or data.get("id") != check["id"]
+                  or data.get("name") != check["name"]
+              ):
+                  return None, "left a result for another check"
+              return data, None
+
+
+          def evaluate(check, data):
+              advisory = check["advisory"] is True
+              triggered = data.get("triggered")
+              isolated = data.get("isolated")
+              outcome = data.get("outcome")
+              violating = data.get("violating_files")
+              if not isinstance(violating, list) or not all(
+                  isinstance(item, str) for item in violating
+              ):
+                  violating = []
+              if triggered not in FLAGS or isolated not in FLAGS:
+                  return None, f"reported no verdict (step {outcome})"
+              entry = {
+                  "name": check["name"],
+                  "advisory": advisory,
+                  "triggered": triggered == "true",
+                  "isolated": isolated == "true",
+                  "violating_files": violating,
+              }
+              if isolated == "false" and not advisory:
+                  return entry, "is not isolated"
+              if outcome != "success":
+                  return entry, f"did not complete (step {outcome})"
+              return entry, None
+
+
+          plan_result = os.environ.get("PLAN_RESULT", "")
+          planned = planned_checks(plan_result, os.environ.get("MATRIX", ""))
+          results_dir = os.environ.get("RESULTS_DIR", "")
+
+          for check in planned:
+              name = check["name"]
+              data, problem = load_result(results_dir, check)
+              entry = None
+              if data is not None:
+                  entry, problem = evaluate(check, data)
+              if problem:
+                  failures.append(f"Isolation: {name} {problem}")
+              results.append(
+                  entry
+                  or {
+                      "name": name,
+                      "advisory": check["advisory"] is True,
+                      "triggered": None,
+                      "isolated": None,
+                      "violating_files": [],
+                  }
+              )
+              if problem:
+                  verdict = f"❌ {problem}"
+              elif not entry["isolated"]:
+                  verdict = "⚠️ not isolated (advisory)"
+              elif entry["triggered"]:
+                  verdict = "✅ isolated"
+              else:
+                  verdict = "✅ not triggered"
+              files = "<br>".join(
+                  f"`{markdown(item)}`"
+                  for item in (entry or {}).get("violating_files", [])
+              )
+              advisory = "yes" if check["advisory"] is True else "no"
+              rows.append(
+                  f"| {markdown(name)} | {advisory} | {verdict} | {files} |"
+              )
+
+          # A leg can record a clean verdict and still fail in a later
+          # step, so the matrix result counts whatever the artifacts say.
+          isolation_result = os.environ.get("ISOLATION_RESULT", "")
+          if planned and isolation_result != "success":
+              shown = isolation_result or "unknown"
+              failures.append(f"The isolation jobs did not succeed ({shown})")
+
+          info_state = os.environ.get("INFO_YAML_STATE", "")
+          info_result = os.environ.get("INFO_YAML_RESULT", "")
+          info_validate = os.environ.get("INFO_YAML_VALIDATE", "") == "true"
+          info_verdict = "not evaluated"
+          if plan_result == "success":
+              if info_state not in ("untouched", "changed", "removed"):
+                  shown = json.dumps(info_state)
+                  failures.append(f"Unknown INFO.yaml state {shown}")
+              elif info_state == "untouched":
+                  info_verdict = "not touched"
+              elif not info_validate:
+                  info_verdict = f"{info_state}; validation disabled"
+              elif info_result != "success":
+                  # A job that should have run and was skipped is a
+                  # failure too: a missing verdict is never a pass.
+                  failures.append(f"INFO.yaml {info_state}: job {info_result}")
+                  info_verdict = f"❌ {info_state}: job {info_result}"
+              else:
+                  info_verdict = "✅ valid"
+          output = os.environ.get("GITHUB_OUTPUT")
+          if output:
+              with open(output, "a", encoding="utf-8") as handle:
+                  delimiter = f"EOF_{secrets.token_hex(16)}"
+                  value = json.dumps(results, separators=(",", ":"))
+                  handle.write(f"results<<{delimiter}\n{value}\n{delimiter}\n")
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              info_path = os.environ.get("INFO_YAML_PATH", "INFO.yaml")
+              with open(summary, "a", encoding="utf-8") as handle:
+                  handle.write("## Change isolation\n\n")
+                  if rows:
+                      handle.write(
+                          "| Check | Advisory | Result | Violating files |\n"
+                          "| --- | --- | --- | --- |\n"
+                      )
+                      handle.write("\n".join(rows) + "\n\n")
+                  shown = markdown(info_path)
+                  handle.write(f"INFO.yaml (`{shown}`): {info_verdict}\n\n")
+                  if failures:
+                      handle.write("### Failures\n\n")
+                      for item in failures:
+                          handle.write(f"- {markdown(item)}\n")
+
+          for item in failures:
+              print(f"::error::{annotate(item)}")
+          if failures:
+              print(f"Change isolation failed: {len(failures)} problem(s) ❌")
+              sys.exit(1)
+          print("Change isolation passed ✅")
+          # END change_isolation_report
+          PYEOF
