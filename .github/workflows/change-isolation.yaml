@@ -4,9 +4,12 @@
 
 # Reusable change isolation workflow.
 #
-#   plan --> Isolation: <check 1>  (matrix, no checkout) --+
-#        +-> Isolation: <check n>                         +--> report
-#        +-> INFO.yaml  (only when the change touches it) -+
+#   [gerrit] -> plan -> Isolation: <check 1>  (matrix, no checkout) -+
+#                   +> Isolation: <check n>                         +> report
+#                   +> INFO.yaml  (only when the change touches it) +
+#
+# 'gerrit' runs in Gerrit mode alone (gerrit_refspec set): it checks
+# the Gerrit inputs and derives the one endpoint 'plan' may reach.
 #
 # Each isolation policy is DATA: the caller lists the checks it wants
 # in 'checks', and every check runs as its own named job, in parallel.
@@ -24,13 +27,34 @@
 #   * The reusable casts no vote and holds no Gerrit SSH key; voting
 #     stays in the caller.
 #   * One job checks the change out to list the files it touches; the
-#     isolation legs receive that list and check nothing out. Only
-#     the INFO.yaml job reads the tree again, to validate the file.
+#     isolation legs receive that list and check nothing out. The
+#     INFO.yaml job receives the file (and .gitreview) from 'plan' as
+#     an artifact, so the change is fetched once per run.
 #   * All variable data reaches 'run' blocks through 'env', never
 #     through expression interpolation.
 #   * Fails closed: an unreachable parent, an empty change, a path the
 #     list cannot carry, a planned check without a result, a skipped
 #     INFO.yaml job that should have run: each fails the run.
+#
+# Egress: every job starts with step-security/harden-runner, in block
+# mode unless harden_runner_egress is 'audit', and allows only the
+# hosts that job needs:
+#   * 'github.com:443' is always listed. harden-runner allows GitHub's
+#     own endpoints implicitly, so listing it changes no enforcement,
+#     but v2.22.2 emits a warning annotation whenever block mode meets
+#     an empty 'allowed-endpoints', and no input suppresses it.
+#   * 'disable-telemetry' is on in block mode. Otherwise the agent
+#     posts telemetry to prod.app-api.stepsecurity.io, which no list
+#     here allows. The input is valid in block mode only, hence the
+#     expression.
+#   * No harden-runner-block-action and no shared allow-list. With a
+#     list this short the agent is ready long before harden-runner's
+#     own 9-second wait expires; resolving the shared list's hosts was
+#     what made the block-action's readiness wait necessary.
+#   * In Gerrit mode, 'plan' also allows the Gerrit server, as the
+#     host:port the 'gerrit' job derives from the Gerrit URL. It must
+#     arrive as a job output: 'allowed-endpoints' is read when the job
+#     starts, before any step of it runs.
 name: '[R] Change Isolation 🔒'
 
 # yamllint disable-line rule:truthy
@@ -119,12 +143,6 @@ on:
         required: false
         type: string
         default: 'block'
-      harden_runner_allowlist:
-        description: 'Out-of-band harden-runner allow-list configuration'
-        required: false
-        type: string
-        # yamllint disable-line rule:line-length
-        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@084d6861688632b2edb6bde3c180145bebf9cc7a'  # v0.17.2
 
     secrets:
       token:
@@ -158,8 +176,113 @@ permissions: {}
 # examples/change-isolation/ for the recommended group.
 
 jobs:
+  gerrit:
+    name: 'Gerrit endpoint'
+    # GitHub mode needs neither the check nor the endpoint, so it
+    # spends no runner here; 'plan' accepts the skipped result.
+    if: inputs.gerrit_refspec != ''
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      endpoint: ${{ steps.endpoint.outputs.endpoint }}
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2  # v2.22.2
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          disable-telemetry: ${{ inputs.harden_runner_egress != 'audit' }}
+          allowed-endpoints: >
+            github.com:443
+
+      # Fails Gerrit mode before any job checks anything out.
+      - name: 'Resolve Gerrit endpoint'
+        id: endpoint
+        env:
+          GERRIT_PROJECT: ${{ inputs.gerrit_project }}
+          GERRIT_BRANCH: ${{ inputs.gerrit_branch }}
+          # yamllint disable-line rule:line-length
+          GERRIT_URL: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+        run: |
+          # Resolve Gerrit endpoint
+          set -euo pipefail
+          # tests/test-change-isolation-plan.sh extracts the script
+          # between the BEGIN and END markers. '-I' as in the plan.
+          python3 -I - <<'PYEOF'
+          # BEGIN change_isolation_gerrit
+          import os
+          import re
+          import sys
+          from urllib.parse import urlsplit
+
+          LABEL = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\Z")
+          REQUIRED = (
+              ("gerrit_project", "GERRIT_PROJECT"),
+              ("gerrit_branch", "GERRIT_BRANCH"),
+              ("gerrit_url/GERRIT_URL", "GERRIT_URL"),
+          )
+
+
+          def fail(message):
+              print(f"::error::{message}")
+              sys.exit(1)
+
+
+          def endpoint(url):
+              # The URL never reaches an annotation: it may hold
+              # characters that would end or forge one.
+              if any(ord(char) <= 0x20 or ord(char) >= 0x7F for char in url):
+                  fail(
+                      "The Gerrit URL contains whitespace, a control"
+                      " character or a non-ASCII character"
+                  )
+              parts = urlsplit(url)
+              if parts.scheme != "https":
+                  fail("The Gerrit URL must start with https://")
+              if parts.query or parts.fragment or url.endswith(("?", "#")):
+                  fail("The Gerrit URL must carry no query or fragment")
+              netloc = parts.netloc
+              if "@" in netloc:
+                  fail("The Gerrit URL must carry no user information")
+              host, colon, port = netloc.partition(":")
+              if colon:
+                  if not port.isdigit() or not 0 < int(port) < 65536:
+                      fail("The Gerrit URL names an invalid port")
+                  port = str(int(port))
+              else:
+                  port = "443"
+              host = host.lower()
+              labels = host.split(".")
+              if len(host) > 253 or not all(
+                  LABEL.match(label) for label in labels
+              ):
+                  fail("The Gerrit URL names an invalid hostname")
+              return f"{host}:{port}"
+
+
+          missing = [
+              name for name, variable in REQUIRED
+              if not os.environ.get(variable, "")
+          ]
+          if missing:
+              fail(f"gerrit_refspec is set but missing: {' '.join(missing)}")
+          result = endpoint(os.environ["GERRIT_URL"])
+          output = os.environ["GITHUB_OUTPUT"]
+          with open(output, "a", encoding="utf-8") as handle:
+              handle.write(f"endpoint={result}\n")
+          print(f"Gerrit endpoint: {result} ✅")
+          # END change_isolation_gerrit
+          PYEOF
+
   plan:
     name: 'Plan'
+    needs: gerrit
+    # A job that needs a skipped one is skipped too unless its 'if'
+    # says otherwise. 'gerrit' may be skipped only in GitHub mode.
+    # yamllint disable-line rule:line-length
+    if: ${{ !cancelled() && (needs.gerrit.result == 'success' || (inputs.gerrit_refspec == '' && needs.gerrit.result == 'skipped')) }}
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: 10
     permissions:
@@ -169,52 +292,19 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
       changed_files: ${{ steps.plan.outputs.changed_files }}
       info_yaml_state: ${{ steps.plan.outputs.info_yaml_state }}
-      head_sha: ${{ steps.plan.outputs.head_sha }}
       run_key: ${{ steps.plan.outputs.run_key }}
     steps:
-      - name: 'Load harden-runner allow-list'
-        # Only 'block' uses the list, so under 'audit' an outage must
-        # not fail the job. A step 'if:' cannot skip the loader: its
-        # 'pre' entry has no 'pre-if'.
-        continue-on-error: ${{ inputs.harden_runner_egress == 'audit' }}
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
-        with:
-          config: ${{ inputs.harden_runner_allowlist }}
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2  # v2.22.2
         with:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          disable-telemetry: ${{ inputs.harden_runner_egress != 'audit' }}
+          # The Gerrit endpoint is empty in GitHub mode.
           allowed-endpoints: >
-            ${{ env.CONNECTION_ALLOW_LIST }}
-
-      - name: 'Require Gerrit project, branch and URL'
-        if: inputs.gerrit_refspec != ''
-        env:
-          GERRIT_PROJECT: ${{ inputs.gerrit_project }}
-          GERRIT_BRANCH: ${{ inputs.gerrit_branch }}
-          # yamllint disable-line rule:line-length
-          GERRIT_URL: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
-        run: |
-          # Require Gerrit project, branch and URL
-          set -euo pipefail
-          missing=''
-          if [ -z "${GERRIT_PROJECT}" ]; then
-            missing="${missing} gerrit_project"
-          fi
-          if [ -z "${GERRIT_BRANCH}" ]; then
-            missing="${missing} gerrit_branch"
-          fi
-          if [ -z "${GERRIT_URL}" ]; then
-            missing="${missing} gerrit_url/GERRIT_URL"
-          fi
-          if [ -n "${missing}" ]; then
-            echo "::error::gerrit_refspec is set but missing:${missing}"
-            exit 1
-          fi
-          echo 'Gerrit inputs present ✅'
+            github.com:443
+            ${{ needs.gerrit.outputs.endpoint }}
 
       # Depth 2 so the change's parent is reachable: the file list is
       # the diff against it.
@@ -483,9 +573,8 @@ jobs:
 
 
           def head_commit():
-              # The INFO.yaml job checks this exact commit out, so a
-              # branch or tag that moves between the jobs cannot have
-              # it validate a revision the plan never listed.
+              # Names the exact commit the plan listed files for in the
+              # log, so a run can be matched to the revision it judged.
               result = subprocess.run(
                   ["git", "rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
                   capture_output=True,
@@ -566,10 +655,63 @@ jobs:
           # END change_isolation_plan
           PYEOF
 
+      # The INFO.yaml job validates these files rather than checking
+      # the change out again, so it judges the revision listed here.
+      # info-yaml-validate-action v0.0.2 reads INFO.yaml and, with no
+      # gerrit_project, .gitreview; nothing else in the tree.
+      - name: 'Stage INFO.yaml'
+        # yamllint disable-line rule:line-length
+        if: inputs.info_yaml_validate && steps.plan.outputs.info_yaml_state == 'changed'
+        env:
+          INFO_YAML_PATH: ${{ inputs.info_yaml_path }}
+          GERRIT_PROJECT: ${{ inputs.gerrit_project }}
+        run: |
+          # Stage INFO.yaml
+          set -euo pipefail
+          stage="${RUNNER_TEMP}/change-isolation-info-yaml"
+          mkdir -p "${stage}"
+          paths=("${INFO_YAML_PATH}")
+          if [ -z "${GERRIT_PROJECT}" ] &&
+            { [ -e .gitreview ] || [ -L .gitreview ]; }; then
+            paths+=(.gitreview)
+          fi
+          workspace="$(pwd -P)"
+          for path in "${paths[@]}"; do
+            # A symlink could hand the artifact a file from outside
+            # the change under test.
+            real="$(realpath -e -- "${path}" 2>/dev/null || true)"
+            if [ -L "${path}" ] || [ ! -f "${path}" ] ||
+              [ "${real#"${workspace}"/}" = "${real}" ]; then
+              echo "::error::${path} must be a regular file in the" \
+                "change, not a symlink"
+              exit 1
+            fi
+            mkdir -p "${stage}/$(dirname -- "${path}")"
+            cp -- "${path}" "${stage}/${path}"
+            echo "Staged ${path} ✅"
+          done
+      - name: 'Upload INFO.yaml'
+        # yamllint disable-line rule:line-length
+        if: inputs.info_yaml_validate && steps.plan.outputs.info_yaml_state == 'changed'
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: change-isolation-info-yaml-${{ steps.plan.outputs.run_key }}
+          path: ${{ runner.temp }}/change-isolation-info-yaml/
+          # .gitreview is a dot file, which upload-artifact skips
+          # unless told otherwise.
+          include-hidden-files: true
+          retention-days: 1
+          if-no-files-found: error
+
   isolation:
     name: 'Isolation: ${{ matrix.name }}'
     needs: plan
-    if: needs.plan.outputs.has_work == 'true'
+    # The default 'if' skips a job when any job earlier in its chain
+    # was skipped, and 'gerrit' is skipped in GitHub mode, so every
+    # job after 'plan' tests the plan's own result instead.
+    # yamllint disable-line rule:line-length
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.has_work == 'true' }}
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: ${{ inputs.timeout_minutes }}
     # No checkout: the plan job hands over the file list.
@@ -579,21 +721,23 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
-      - name: 'Load harden-runner allow-list'
-        continue-on-error: ${{ inputs.harden_runner_egress == 'audit' }}
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
-        with:
-          config: ${{ inputs.harden_runner_allowlist }}
-          allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2  # v2.22.2
         with:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          disable-telemetry: ${{ inputs.harden_runner_egress != 'audit' }}
+          # change-isolation-action v0.3.0 installs uv and pathspec at
+          # run time. Drop the four hosts after github.com once its pin
+          # moves to the release carrying
+          # lfreleng-actions/change-isolation-action#88.
           allowed-endpoints: >
-            ${{ env.CONNECTION_ALLOW_LIST }}
+            github.com:443
+            raw.githubusercontent.com:443
+            releases.astral.sh:443
+            pypi.org:443
+            files.pythonhosted.org:443
 
       - name: 'Check isolation'
         id: check
@@ -661,29 +805,30 @@ jobs:
     name: 'INFO.yaml'
     needs: plan
     # Skipped when the change leaves INFO.yaml alone, which reads in
-    # the run as "INFO.yaml not touched".
+    # the run as "INFO.yaml not touched". '!cancelled()' as for the
+    # isolation legs.
     # yamllint disable-line rule:line-length
-    if: inputs.info_yaml_validate && needs.plan.outputs.has_work == 'true' && needs.plan.outputs.info_yaml_state != 'untouched'
+    if: ${{ !cancelled() && needs.plan.result == 'success' && inputs.info_yaml_validate && needs.plan.outputs.has_work == 'true' && needs.plan.outputs.info_yaml_state != 'untouched' }}
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: ${{ inputs.timeout_minutes }}
-    permissions:
-      contents: read
+    # No checkout: 'plan' hands over the files to validate.
+    permissions: {}
     steps:
-      - name: 'Load harden-runner allow-list'
-        continue-on-error: ${{ inputs.harden_runner_egress == 'audit' }}
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
-        with:
-          config: ${{ inputs.harden_runner_allowlist }}
-          allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2  # v2.22.2
         with:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          disable-telemetry: ${{ inputs.harden_runner_egress != 'audit' }}
+          # info-yaml-validate-action installs uv, jsonschema, PyYAML
+          # and referencing at run time.
           allowed-endpoints: >
-            ${{ env.CONNECTION_ALLOW_LIST }}
+            github.com:443
+            raw.githubusercontent.com:443
+            releases.astral.sh:443
+            pypi.org:443
+            files.pythonhosted.org:443
 
       # INFO.yaml is mandatory in every Gerrit project, and
       # committer-management automation reads it, so its deletion
@@ -700,31 +845,14 @@ jobs:
             "its INFO.yaml; restore the file."
           exit 1
 
-      - name: 'Checkout Gerrit change'
-        if: inputs.gerrit_refspec != ''
+      # Into the workspace at the paths the plan staged them under,
+      # where info-yaml-validate-action looks for them.
+      - name: 'Download INFO.yaml'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
-          gerrit-project: ${{ inputs.gerrit_project }}
-          # yamllint disable-line rule:line-length
-          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
-          delay: '0s'
-          repository: ${{ inputs.repository || github.repository }}
-          ref: refs/heads/${{ inputs.gerrit_branch }}
-          token: ${{ secrets.token || github.token }}
-      # The commit the plan listed files for, not 'ref' again: a branch
-      # or tag can move between the two jobs. A Gerrit patchset ref
-      # cannot, so the Gerrit checkout above repeats the plan's.
-      - name: 'Checkout repository'
-        if: inputs.gerrit_refspec == ''
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ needs.plan.outputs.head_sha }}
-          persist-credentials: false
-          token: ${{ secrets.token || github.token }}
+          name: change-isolation-info-yaml-${{ needs.plan.outputs.run_key }}
+          path: ${{ github.workspace }}
 
       - name: 'Validate INFO.yaml'
         # yamllint disable-line rule:line-length
@@ -743,21 +871,15 @@ jobs:
     outputs:
       results: ${{ steps.report.outputs.results }}
     steps:
-      - name: 'Load harden-runner allow-list'
-        continue-on-error: ${{ inputs.harden_runner_egress == 'audit' }}
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
-        with:
-          config: ${{ inputs.harden_runner_allowlist }}
-          allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2  # v2.22.2
         with:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          disable-telemetry: ${{ inputs.harden_runner_egress != 'audit' }}
           allowed-endpoints: >
-            ${{ env.CONNECTION_ALLOW_LIST }}
+            github.com:443
 
       # A download that finds nothing must not stop the report: a
       # planned check without a result is a failure the report itself
