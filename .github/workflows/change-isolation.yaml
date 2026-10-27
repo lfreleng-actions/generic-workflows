@@ -856,7 +856,7 @@ jobs:
 
       - name: 'Validate INFO.yaml'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/info-yaml-validate-action@17a31b5b8539127fad32907bbb3d9a9b6caf6407  # v0.0.2
+        uses: lfreleng-actions/info-yaml-validate-action@d3e4e7369a8ea5f6c19900c92c266a1e1c5b8172  # v0.1.0
         with:
           path: ${{ inputs.info_yaml_path }}
           project: ${{ inputs.gerrit_project }}
