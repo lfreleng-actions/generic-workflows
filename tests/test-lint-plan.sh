@@ -54,9 +54,23 @@ fi
 # from. Running the fixtures against an untrusted checkout without it
 # would install a checkout-selected package before the isolated
 # interpreter ever starts.
+#
+# '--python "$py"': uv runs the interpreter of a '.venv/' in the
+# current directory or a parent ahead of anything else, '--no-config'
+# and '-I' notwithstanding. The workflow resolves an absolute path
+# once, from a directory outside the checkout, and so does this.
+workdir="$(mktemp -d)"
+trap 'rm -rf "${workdir}"' EXIT
+
 if command -v uv > /dev/null 2>&1; then
-  PY_RUN=(uv run --no-project --no-config --with pyyaml==6.0.2
-    python -I)
+  py="$(cd "${workdir}" &&
+    UV_NO_CONFIG=1 uv python find --system --no-project)"
+  if [ -z "${py}" ]; then
+    echo 'ERROR: uv found no system Python interpreter' >&2
+    exit 1
+  fi
+  PY_RUN=(uv run --no-project --no-config --python "${py}"
+    --with pyyaml==6.0.2 python -I)
 elif python3 -I -c 'import yaml' > /dev/null 2>&1; then
   PY_RUN=(python3 -I)
 else
@@ -67,8 +81,6 @@ else
   exit 1
 fi
 
-workdir="$(mktemp -d)"
-trap 'rm -rf "${workdir}"' EXIT
 resolver="${workdir}/plan.py"
 
 # Copy the marked region out of the heredoc, stripping the YAML block
@@ -144,15 +156,36 @@ fi
 # checkout. A fork-committed 'uv.toml' can redirect the index that
 # '--with pyyaml' resolves from, so the package imported ahead of the
 # resolver becomes attacker code -- which '-I' cannot prevent,
-# because it arrives AS PyYAML rather than beside it.
-if ! grep -qE '^[[:space:]]*uv run --no-project --no-config --with' \
+# because it arrives AS PyYAML rather than beside it. And neither flag
+# stops uv running a '.venv/' interpreter from the checkout: only an
+# absolute '--python' does.
+# shellcheck disable=SC2016  # a regex and a literal '$py'
+if ! grep -qE \
+  '^[[:space:]]*uv run --no-project --no-config --python "\$py" \\$' \
   "${workflow}"; then
   echo 'ERROR: the resolver in' >&2
   echo "       ${workflow}" >&2
-  echo '       no longer runs uv with --no-config. A fork-committed' >&2
-  echo '       uv.toml could then choose the index PyYAML installs' >&2
-  echo '       from, and that package is imported before the' >&2
-  echo '       resolver runs.' >&2
+  echo '       no longer runs uv with --no-config and an absolute' >&2
+  echo '       --python "$py". Without --no-config a committed' >&2
+  echo '       uv.toml could choose the index PyYAML installs from;' >&2
+  echo '       without --python, uv runs a committed .venv/bin/python3' >&2
+  echo '       in place of the resolver.' >&2
+  exit 1
+fi
+
+# The absolute path has to come from outside the checkout: 'uv python
+# find' run there without '--system' returns the committed '.venv'.
+# shellcheck disable=SC2016  # a regex, not a string to expand
+if ! grep -qE \
+  '^[[:space:]]*py="\$\(cd "\$RUNNER_TEMP" &&$' "${workflow}" ||
+  ! grep -qE \
+    '^[[:space:]]*UV_NO_CONFIG=1 uv python find --system --no-project\)"$' \
+    "${workflow}"; then
+  echo 'ERROR: the resolver in' >&2
+  echo "       ${workflow}" >&2
+  echo '       no longer finds its interpreter with' >&2
+  echo "       'uv python find --system --no-project' from" >&2
+  echo '       RUNNER_TEMP under UV_NO_CONFIG=1.' >&2
   exit 1
 fi
 
@@ -1304,6 +1337,139 @@ else
   printf 'FAIL: %s\n' \
     'the resolver failed to run from a hostile directory' >&2
   sed 's/^/  /' "${workdir}/stdout" >&2
+fi
+
+# The same, for the interpreter rather than a module. uv runs the
+# interpreter of a '.venv/' in the current directory or a parent ahead
+# of the one asked for, whatever '--no-config' and '-I' say, and plan
+# mode checks out a whole pull request -- '.venv/' included -- in the
+# directory the resolver runs from. A '.python-version' naming an
+# executable and a 'uv.toml' are planted beside it.
+#
+# Every planted executable appends to a marker as it starts and exits
+# 1. uv passes over an interpreter that fails, so the resolver still
+# producing a plan proves nothing; only the marker counts. Without uv
+# (the pre-commit.ci route) the resolver runs under plain python3,
+# which never looks at a '.venv', so the case cannot fail there.
+planted="${workdir}/planted"
+marker="${workdir}/planted-ran"
+mkdir -p "${planted}/.venv/bin" "${planted}/pv"
+printf 'home = /usr/bin\nversion = 3.12.0\n' \
+  > "${planted}/.venv/pyvenv.cfg"
+for exe in .venv/bin/python3 .venv/bin/python pv/python3; do
+  printf '#!/bin/sh\necho "%s $*" >> "%s"\nexit 1\n' \
+    "${exe}" "${marker}" > "${planted}/${exe}"
+  chmod +x "${planted}/${exe}"
+done
+printf '%s\n' "${planted}/pv/python3" > "${planted}/.python-version"
+printf '%s\n' 'cache-dir = "/nonexistent/planted-cache"' \
+  'required-version = "==0.0.1"' > "${planted}/uv.toml"
+cp "${repo_root}/.pre-commit-config.yaml" "${planted}/"
+
+planted_run() {
+  # Runs the resolver from the planted directory, on stdin, as the
+  # workflow does. Any arguments replace PY_RUN as the command.
+  local -a cmd=("${PY_RUN[@]}")
+  [ "$#" -eq 0 ] || cmd=("$@")
+  : > "${workdir}/out"
+  # VIRTUAL_ENV and CONDA_PREFIX are dropped because uv prefers them to
+  # a '.venv/' in the directory, and the workflow sets neither; a hook
+  # environment that did would hide the very lookup under test.
+  (cd "${planted}" && env -u VIRTUAL_ENV -u CONDA_PREFIX \
+    GITHUB_WORKSPACE="${planted}" \
+    RUNNER_TEMP="${workdir}" \
+    GITHUB_OUTPUT="${workdir}/out" \
+    GITHUB_STEP_SUMMARY="${workdir}/summary" \
+    PRIMARY='.pre-commit-config.yaml' \
+    ORG_JSON='' INPUT_PLAN='' INPUT_HOOKS='' \
+    INPUT_CONFIG_PATH='' INPUT_CONFIG_URL='' INPUT_CONFIG_SHA256='' \
+    INPUT_SPLIT_HOOKS='true' PRIMARY_ERROR='' \
+    INPUT_ORG_CONFIG_PATH='linting/.pre-commit-config.yaml' \
+    "${cmd[@]}" - < "${resolver}" > "${workdir}/stdout" 2>&1)
+}
+
+# A control first: the plants must actually be reached by the command
+# the workflow used to run, or the case below would pass on a fixture
+# that tests nothing.
+if [ "${PY_RUN[0]}" = 'uv' ]; then
+  rm -f "${marker}"
+  planted_run uv run --no-project --no-config --with pyyaml==6.0.2 \
+    python -I || true
+  if [ -s "${marker}" ]; then
+    passed=$((passed + 1))
+  else
+    failed=$((failed + 1))
+    printf 'FAIL: %s\n' \
+      'control: uv without --python did not reach the planted .venv' >&2
+    sed 's/^/  /' "${workdir}/stdout" >&2
+  fi
+fi
+
+rm -f "${marker}"
+if planted_run; then
+  if [ -e "${marker}" ]; then
+    failed=$((failed + 1))
+    printf 'FAIL: %s\n' \
+      'a planted .venv or .python-version interpreter ran' >&2
+    sed 's/^/  /' "${marker}" >&2
+  elif ! grep -q '^has_work=true$' "${workdir}/out"; then
+    failed=$((failed + 1))
+    printf 'FAIL: %s\n' \
+      'the resolver beside a planted .venv planned no work' >&2
+    sed 's/^/  /' "${workdir}/out" >&2
+  else
+    passed=$((passed + 1))
+  fi
+else
+  failed=$((failed + 1))
+  printf 'FAIL: %s\n' \
+    'the resolver failed to run beside a planted .venv' >&2
+  sed 's/^/  /' "${workdir}/stdout" >&2
+fi
+rm -rf "${planted}"
+
+# setup-uv, one step earlier, has the same reach: it executes the
+# interpreter 'uv python find' returns in its working directory, and
+# reads uv.toml there itself. Pin that the plan job points it outside
+# the checkout and keeps uv off any '.venv' and uv config.
+setup_uv_wiring() {
+  "${PY_RUN[@]}" - "${workflow}" <<'PYEOF'
+import sys
+
+import yaml
+
+with open(sys.argv[1], encoding='utf-8') as handle:
+    doc = yaml.safe_load(handle)
+steps = [
+    step
+    for job in doc['jobs'].values()
+    for step in job.get('steps', [])
+    if str(step.get('uses', '')).startswith('astral-sh/setup-uv@')
+]
+if not steps:
+    print('no setup-uv step found')
+    sys.exit()
+for step in steps:
+    name = step.get('name', '?')
+    wd = step.get('with', {}).get('working-directory')
+    if wd != '${{ runner.temp }}':
+        print(f'{name}: working-directory {wd!r}')
+        sys.exit()
+    env = step.get('env', {})
+    for key in ('UV_NO_CONFIG', 'UV_SYSTEM_PYTHON', 'UV_NO_PROJECT'):
+        if env.get(key) != '1':
+            print(f'{name}: env {key} is {env.get(key)!r}')
+            sys.exit()
+print('ok')
+PYEOF
+}
+
+got="$(setup_uv_wiring)"
+if [ "${got}" = 'ok' ]; then
+  passed=$((passed + 1))
+else
+  failed=$((failed + 1))
+  printf 'FAIL: setup-uv wiring: %s\n' "${got}" >&2
 fi
 
 # An intentionally EMPTY configuration is valid -- 'repos: []' says
