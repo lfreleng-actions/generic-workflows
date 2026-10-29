@@ -107,6 +107,7 @@ jobs:
     #   validate_single_commit: true
     #   validate_single_commit_matches_pr_title: true
     #   dependabot_relax: true     # false holds bots to an exact match
+    #   validate_breaking_marker: false  # true fails commit-only '!'
     #   runs_on: 'ubuntu-latest'   # Linux only
     #   timeout_minutes: 5
     #   harden_runner_egress: 'block'

@@ -20,6 +20,7 @@ which it replaces.
 
 ```text
 Load egress allow-list -> Harden runner -> Gate -> Title check
+  -> Breaking-change check (opt-in)
 ```
 
 Everything happens in one job. The check gates every pull request event
@@ -35,6 +36,9 @@ the gate step.
    [`amannn/action-semantic-pull-request`](https://github.com/amannn/action-semantic-pull-request),
    with `validateSingleCommitMatchesPrTitle` computed from the caller's
    input and the gate's decision.
+3. **Breaking-change check** — runs when the caller sets
+   `validate_breaking_marker: true`, and not otherwise; see
+   [Undeclared breaking changes](#undeclared-breaking-changes).
 
 ## The Dependabot exception
 
@@ -120,6 +124,50 @@ function from the workflow rather than copying it, so the fixtures
 always exercise the code that runs in CI, and pre-commit runs it
 whenever either file changes.
 
+## Undeclared breaking changes
+
+The title check validates the pull request title alone, and
+release-drafter's autolabeler matches on files, branch, title and body
+but never on commits. A pull request whose commits declare a breaking
+change while its title does not passes, gets no
+`breaking-change` label, and drafts a minor release. Multi-commit pull
+requests are where this bites: the single-commit match never engages,
+and a breaking commit seventh of eleven reaches no gate at all.
+
+Set `validate_breaking_marker: true` to close that gap. The job then
+reads the full message of every non-merge commit and fails when any of
+them declares a breaking change while the title carries no `!`. A
+commit declares one by either Conventional Commits form:
+
+- a `!` straight before the header's colon, as in `Feat(api)!: ...`.
+  The type matches in any case, as release-drafter's own
+  `/^[a-z]+(\([^)]+\))?!:/i` does, and a `!` anywhere else in the
+  header, as in `Fix: Handle ! in code`, is not a marker;
+- a `BREAKING CHANGE:` or `BREAKING-CHANGE:` footer, in upper case at
+  the start of a line after the header.
+
+The check fails rather than labelling, so the title stays the single
+source of truth for the label and the version bump it drives. The
+error names each offending commit by SHA and marker form, and the step
+summary lists their subjects. The author either adds the `!` to the
+title or corrects a commit that should not have claimed a breaking
+change.
+
+The check reads the title and labels through the API, as the action
+does, and a label listed in `ignore_labels` skips it too. It parses
+that list as the action does, one label per line with surrounding
+whitespace trimmed, so a label may contain spaces or commas. Unlike
+the gate, it treats an API failure as fatal: a caller that asked for
+the check should not see it pass because it never ran.
+
+GitHub lists at most 250 commits for a pull request. When the listing
+does not match the pull request's commit count, the check fails rather
+than vouch for commits it never read; split the pull request, or apply
+an ignored label and review the commits by hand.
+
+`tests/test-breaking-marker.sh` pins the marker and label rules,
+extracting them from the workflow as `tests/test-relax-matches.sh` does.
+
 ## Inputs
 
 All inputs are optional.
@@ -138,6 +186,7 @@ All inputs are optional.
 | `validate_single_commit`                  | `boolean` | `true`                                                         | Check the commit message on single-commit pull requests                |
 | `validate_single_commit_matches_pr_title` | `boolean` | `true`                                                         | Require the single commit subject to match the title                   |
 | `dependabot_relax`                        | `boolean` | `true`                                                         | Allow the Dependabot version-fragment exception                        |
+| `validate_breaking_marker`                | `boolean` | `false`                                                        | Fail when a commit declares a breaking change the title does not       |
 | `runs_on`                                 | `string`  | `ubuntu-latest`                                                | Runner label; must be Linux                                            |
 | `timeout_minutes`                         | `number`  | `5`                                                            | Job timeout                                                            |
 | `harden_runner_egress`                    | `string`  | `block`                                                        | `block` or `audit`                                                     |

@@ -4,11 +4,12 @@
 
 # Reusable Conventional Commits pull request title check.
 #
-#   semantic-pull-request  (single job: gate -> validate)
+#   semantic-pull-request  (single job: gate -> validate -> breaking)
 #
-# Wraps amannn/action-semantic-pull-request and adds one thing the
+# Wraps amannn/action-semantic-pull-request and adds two things the
 # action cannot express: a narrowly-scoped exception for Dependabot's
-# truncated single-commit subjects.
+# truncated single-commit subjects, and an opt-in check that no commit
+# declares a breaking change the title does not (see the last step).
 #
 # Dependabot shortens a commit subject that would otherwise be too long
 # by deleting the ' from <old> to <new>' version fragment, sometimes
@@ -118,6 +119,16 @@ on:
         required: false
         type: boolean
         default: true
+
+      # --- Breaking-change check ---
+      validate_breaking_marker:
+        description: >-
+          Fail when a non-merge commit declares a breaking change, by a
+          '!' before the colon or a 'BREAKING CHANGE:' footer, that the
+          pull request title does not
+        required: false
+        type: boolean
+        default: false
 
       # --- Runner selection and timeout ---
       runs_on:
@@ -556,3 +567,177 @@ jobs:
           # truncation the gate step above identified.
           # yamllint disable-line rule:line-length
           validateSingleCommitMatchesPrTitle: ${{ inputs.validate_single_commit_matches_pr_title && steps.gate.outputs.relaxed != 'true' }}
+
+      # Opt-in. release-drafter's autolabeler reads the title but not
+      # the commits, so a breaking change declared in a commit alone
+      # never reaches the 'breaking-change' label or the major version
+      # bump it drives. Rather than label from the commits, fail and
+      # leave the title the single source of truth: the author either
+      # promotes the '!' to the title or corrects the commit.
+      - name: 'Check commits for undeclared breaking changes'
+        if: inputs.validate_breaking_marker
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          IGNORE_LABELS: ${{ inputs.ignore_labels }}
+        run: |
+          # Fail when a commit declares a breaking change the title lacks
+          set -euo pipefail
+
+          # BEGIN breaking_marker (extracted by tests/test-breaking-marker.sh)
+          # True when the header carries the Conventional Commits '!'
+          # marker straight before the colon, as in 'Feat(x)!: ...'. A
+          # '!' anywhere else in the header is not a marker. The type
+          # matches in either case, as release-drafter's autolabeler
+          # regex /^[a-z]+(\([^)]+\))?!:/i does.
+          breaking_header() {
+            local re='^[[:alpha:]]+(\([^)]+\))?!:'
+            [[ "$1" =~ ${re} ]]
+          }
+
+          # Print which form of breaking-change declaration a full
+          # commit message carries, 'header' or 'footer', and return 1
+          # when it carries neither. The footer token must be upper
+          # case, 'BREAKING CHANGE:' or its synonym 'BREAKING-CHANGE:',
+          # at the start of a line after the header, as Conventional
+          # Commits specifies.
+          breaking_marker() {
+            local message="$1" line
+            local footer='^BREAKING[ -]CHANGE:([[:space:]]|$)'
+
+            if breaking_header "${message%%$'\n'*}"; then
+              echo 'header'
+              return 0
+            fi
+
+            [[ "${message}" == *$'\n'* ]] || return 1
+            while IFS= read -r line || [ -n "${line}" ]; do
+              line="${line%$'\r'}"
+              if [[ "${line}" =~ ${footer} ]]; then
+                echo 'footer'
+                return 0
+              fi
+            done <<< "${message#*$'\n'}"
+            return 1
+          }
+
+          # Return 0 when any label after the first argument appears in
+          # the first, an ignore_labels list. The title action (v6.1.1)
+          # splits that list on newlines alone and trims each entry, so
+          # a label may hold spaces or commas; this matches it.
+          ignored_label() {
+            local list="$1" entry label
+            shift
+            while IFS= read -r entry || [ -n "${entry}" ]; do
+              entry="${entry#"${entry%%[![:space:]]*}"}"
+              entry="${entry%"${entry##*[![:space:]]}"}"
+              [ -n "${entry}" ] || continue
+              for label in "$@"; do
+                if [ "${label}" = "${entry}" ]; then
+                  return 0
+                fi
+              done
+            done <<< "${list}"
+            return 1
+          }
+          # END breaking_marker
+
+          # Read the title and labels through the API rather than the
+          # payload, which a re-run after an edit carries stale. Unlike
+          # the gate above, a failure here is fatal: the caller asked
+          # for this check, and skipping it would pass silently.
+          if ! pr_json="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}")"; then
+            echo '::error::Could not read pull request metadata'
+            exit 1
+          fi
+          title="$(printf '%s' "${pr_json}" | jq -r '.title')"
+          expected="$(printf '%s' "${pr_json}" | jq -r '.commits')"
+
+          # Honour ignore_labels as the title check does, so a label
+          # that skips validation skips all of it.
+          mapfile -t labels < <(
+            printf '%s' "${pr_json}" | jq -r '.labels[].name'
+          )
+          if ignored_label "${IGNORE_LABELS}" "${labels[@]}"; then
+            echo '⏩ Pull request carries an ignored label'
+            exit 0
+          fi
+
+          if breaking_header "${title}"; then
+            echo '✅ Pull request title declares a breaking change'
+            exit 0
+          fi
+
+          # Every commit with its parent count and full message,
+          # base64-encoded so each multi-line message stays on one line
+          # beside its SHA.
+          if ! commits="$(
+            gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/commits" \
+              --jq '.[] | [.sha, (.parents | length | tostring),
+                (.commit.message | @base64)] | join(" ")'
+          )"; then
+            echo '::error::Could not list pull request commits'
+            exit 1
+          fi
+
+          # The endpoint lists at most 250 commits however it is paged,
+          # so a longer pull request would pass with commits unread.
+          # Fail closed on any mismatch, which a push mid-run can also
+          # cause: a check that cannot see every commit cannot vouch
+          # for them.
+          listed=0
+          if [ -n "${commits}" ]; then
+            listed="$(printf '%s\n' "${commits}" | wc -l)"
+          fi
+          if ! [[ "${expected}" =~ ^[0-9]+$ ]] \
+            || [ "${listed}" -ne "${expected}" ]; then
+            echo "::error::Listed ${listed} of ${expected} pull request" \
+              "commits; GitHub lists at most 250, so the check cannot" \
+              "read them all. Re-run if the branch moved; otherwise" \
+              "split the pull request, or add a label from" \
+              "ignore_labels and check the commits by hand"
+            exit 1
+          fi
+
+          offenders=()
+          subjects=()
+          while read -r sha parents encoded; do
+            [ -n "${sha}" ] || continue
+            # Skip merge commits, as the gate does.
+            [ "${parents}" -lt 2 ] || continue
+            message="$(printf '%s' "${encoded}" | base64 -d)"
+            if kind="$(breaking_marker "${message}")"; then
+              offenders+=("${sha:0:12} (${kind})")
+              subjects+=("${message%%$'\n'*}")
+            fi
+          done <<< "${commits}"
+
+          if [ "${#offenders[@]}" -eq 0 ]; then
+            echo '✅ No commit declares a breaking change'
+            exit 0
+          fi
+
+          # Only SHAs and the fixed 'header'/'footer' vocabulary reach
+          # the log annotations. The untrusted subjects render in an
+          # indented code block in the summary, as the gate's do.
+          for offender in "${offenders[@]}"; do
+            echo "::error::Commit ${offender} declares a breaking" \
+              "change the pull request title does not"
+          done
+          echo "::error::Add '!' before the ':' in the pull request" \
+            "title, or remove the breaking-change marker from the" \
+            "commits listed above"
+
+          {
+            echo '### Undeclared breaking changes'
+            echo ''
+            echo 'These commits declare a breaking change, but the pull'
+            echo "request title carries no '!' before its ':'."
+            echo ''
+            for i in "${!offenders[@]}"; do
+              printf '    %s %s\n' "${offenders[i]}" "${subjects[i]}"
+            done
+          } >> "${GITHUB_STEP_SUMMARY}"
+          exit 1

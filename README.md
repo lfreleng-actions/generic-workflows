@@ -97,8 +97,9 @@ pull request events and delegates to it. The workflow migrated from
 
 On top of a bare call to
 [`amannn/action-semantic-pull-request`](https://github.com/amannn/action-semantic-pull-request)
-it adds one thing the action cannot express: a narrow exception for
-Dependabot's truncated single-commit subjects.
+it adds two rules the action cannot express: a narrow exception for
+Dependabot's truncated single-commit subjects, and an opt-in check
+that no commit declares a breaking change the title does not.
 
 Dependabot shortens a long commit subject by deleting the
 `from <old> to <new>` version fragment, and sometimes the directory
@@ -112,6 +113,12 @@ context and audit fix marker — and relaxes the match for it alone.
 Genuine drift, such as a title updated to a newer version while the
 commit subject keeps the old one, still fails.
 
+With `validate_breaking_marker: true`, the job also fails when a
+non-merge commit carries a `!` before its colon or a
+`BREAKING CHANGE:` footer while the title carries no `!`.
+release-drafter's autolabeler reads the title alone, so such a change
+would otherwise ship as a minor release.
+
 <!-- markdownlint-disable MD013 -->
 
 | Input                                     | Type      | Default              | Effect                                               |
@@ -124,6 +131,7 @@ commit subject keeps the old one, still fails.
 | `validate_single_commit`                  | `boolean` | `true`               | Check the message on single-commit pull requests     |
 | `validate_single_commit_matches_pr_title` | `boolean` | `true`               | Require the single commit subject to match the title |
 | `dependabot_relax`                        | `boolean` | `true`               | Allow the Dependabot version-fragment exception      |
+| `validate_breaking_marker`                | `boolean` | `false`              | Fail on a breaking commit the title does not declare |
 
 <!-- markdownlint-enable MD013 -->
 
