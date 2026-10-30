@@ -6,9 +6,10 @@
 # EXAMPLE: Gerrit change isolation caller (ONAP shape: two checks)
 # =============================================================================
 # gerrit_to_platform dispatches this workflow when a patchset arrives in
-# Gerrit. It clears the previous vote, runs the reusable change
-# isolation workflow, and votes Verified on the change from the run's
-# overall conclusion.
+# Gerrit. It checks that the voting account can read the change,
+# clears the previous vote, runs the reusable change isolation
+# workflow, and votes Verified on the change from the run's overall
+# conclusion.
 #
 # Two policies, each its own job in the run:
 #   * INFO.yaml  a change to the root INFO.yaml must touch nothing else
@@ -24,9 +25,37 @@
 #   * Copied into a project instead, name the file with BOTH 'gerrit'
 #     AND 'verify' so gerrit_to_platform discovers it. TARGET_REPO then
 #     stays empty and the caller's own repository is checked out.
-#   * Set the variables GERRIT_SERVER, GERRIT_SSH_REQUIRED_USER,
-#     GERRIT_KNOWN_HOSTS and GERRIT_URL, and the secret
-#     GERRIT_SSH_REQUIRED_PRIVKEY.
+#   * Set the repository or organisation variables GERRIT_SERVER,
+#     GERRIT_SSH_REQUIRED_USER, GERRIT_KNOWN_HOSTS and GERRIT_URL, and
+#     the secret GERRIT_SSH_REQUIRED_PRIVKEY. The 'visibility',
+#     'prepare' and 'vote' jobs read the first three and the secret to
+#     reach Gerrit over SSH as the voting account; the reusable reads
+#     GERRIT_URL alone.
+#   * 'visibility', 'prepare' and 'vote' block egress except to the
+#     hosts in the organisation's Gerrit-servers allow-list
+#     (.github/harden-runner/lf-gerrit-servers/gerrit_servers.txt in
+#     lfreleng-actions/.github). A project Gerrit missing from that
+#     list is blocked; add it there.
+#
+# Jobs, in order:
+#   visibility        can the voting account read the change?
+#   prepare           clear the previous vote
+#   change-isolation  the reusable workflow
+#   vote              vote Verified from the run's conclusion
+#
+# gerrit_to_platform dispatches private changes too, which the voting
+# account cannot read, and GitHub holds no copy of their refs. The
+# 'visibility' job gates every later job:
+#   * Readable change: succeeds with visible=true; the later jobs run
+#     as before.
+#   * Private (unreadable) change: succeeds with visible=false; the
+#     later jobs are skipped, so no vote and no failure email. Making
+#     the change public dispatches a fresh run, which verifies it.
+#   * Gerrit unreachable, a refused credential or an unreadable
+#     answer: fails with no output; the later jobs are skipped and the
+#     failed 'visibility' job is the signal.
+# The gate stays until the project's Gerrit runs the gerrit_to_platform
+# dispatcher fix (v0.4.0), and can then be removed.
 #
 # Voting lives here rather than in the reusable workflow, so the
 # reusable never receives the Gerrit SSH key, and which account votes
@@ -91,18 +120,73 @@ concurrency:
 permissions: {}
 
 jobs:
+  # Remove this job, and the 'visibility' needs and conditions below,
+  # once the project's Gerrit runs a gerrit_to_platform release with
+  # the dispatcher fix (lfit/releng-gerrit_to_platform#116, v0.4.0),
+  # which stops dispatching private changes.
+  visibility:
+    name: 'Change visibility'
+    runs-on: ubuntu-latest
+    # The check travels to Gerrit over SSH, so GITHUB_TOKEN needs no
+    # scopes.
+    permissions: {}
+    timeout-minutes: 5
+    outputs:
+      visible: ${{ steps.check.outputs.visible }}
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        with:
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lf-gerrit-servers/gerrit_servers.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: block
+          disable-telemetry: true
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      # The default 'ssh' mode asks as the voting account: what matters
+      # is whether that account can read the change, not anonymous
+      # users. A refused credential, an unreachable server or an
+      # unreadable answer fails this step rather than reporting
+      # 'false'.
+      - name: 'Is the change visible to the voting account?'
+        id: check
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/gerrit-change-visible-action@31eb69fc83b5de1c31504ef0a4b0b83e64634b97  # v0.0.1
+        with:
+          gerrit-change-number: ${{ inputs.GERRIT_CHANGE_NUMBER }}
+          host: ${{ vars.GERRIT_SERVER }}
+          username: ${{ vars.GERRIT_SSH_REQUIRED_USER }}
+          key: ${{ secrets.GERRIT_SSH_REQUIRED_PRIVKEY }}
+          known_hosts: ${{ vars.GERRIT_KNOWN_HOSTS }}
+
   prepare:
     name: 'Clear vote'
+    needs: visibility
+    if: needs.visibility.outputs.visible == 'true'
     runs-on: ubuntu-latest
     # Votes travel to Gerrit over SSH, so GITHUB_TOKEN needs no scopes.
     permissions: {}
     timeout-minutes: 5
     steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        with:
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lf-gerrit-servers/gerrit_servers.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
         with:
-          egress-policy: audit
+          egress-policy: block
+          disable-telemetry: true
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
       - name: 'Clear votes'
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/gerrit-review-action@d56b0b5c81402f8cb435aaca513bebdea3be951e  # v1.2.0
@@ -119,7 +203,8 @@ jobs:
 
   change-isolation:
     name: 'Change Isolation'
-    needs: prepare
+    needs: [visibility, prepare]
+    if: needs.visibility.outputs.visible == 'true'
     permissions:
       contents: read
     # REPLACE the pinned SHA below with a generic-workflows release SHA.
@@ -144,18 +229,30 @@ jobs:
 
   vote:
     name: 'Set vote'
-    if: ${{ always() }}
-    needs: [prepare, change-isolation]
+    # always() keeps a failed 'prepare' or 'change-isolation' from
+    # skipping the vote; the visibility test still skips it when the
+    # change is unreadable or the check itself failed.
+    if: ${{ always() && needs.visibility.outputs.visible == 'true' }}
+    needs: [visibility, prepare, change-isolation]
     runs-on: ubuntu-latest
     permissions:
       actions: read  # workflow-conclusion reads job results via the API
     timeout-minutes: 5
     steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        with:
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lf-gerrit-servers/gerrit_servers.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
         with:
-          egress-policy: audit
+          egress-policy: block
+          disable-telemetry: true
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
       - name: 'Get conclusion'
         # yamllint disable-line rule:line-length
         uses: im-open/workflow-conclusion@8eac7f17381a6917bc04fec3e2c92e70ebc37526  # v3.0.0

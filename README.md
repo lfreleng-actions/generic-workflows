@@ -418,11 +418,14 @@ jobs:
 ```
 
 The reusable casts no vote: the caller clears and sets it around the
-call, so the Gerrit SSH key never reaches the reusable. Copy a caller
-from [`examples/change-isolation/`](examples/change-isolation/), and
-see [`docs/change-isolation.md`](docs/change-isolation.md) for the
+call, so the Gerrit SSH key never reaches the reusable. The example
+callers first check that the voting account can read the change, and
+skip every later job for a private one. Copy a caller from
+[`examples/change-isolation/`](examples/change-isolation/), and see
+[`docs/change-isolation.md`](docs/change-isolation.md) for the
 `checks` format, the inputs and outputs, the rename and deletion
-rules, and the migration from the legacy workflows.
+rules, the visibility gate, and the migration from the legacy
+workflows.
 
 ## Caller filenames
 
