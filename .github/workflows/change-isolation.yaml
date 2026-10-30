@@ -9,7 +9,8 @@
 #                   +> INFO.yaml  (only when the change touches it) +
 #
 # 'gerrit' runs in Gerrit mode alone (gerrit_refspec set): it checks
-# the Gerrit inputs and derives the one endpoint 'plan' may reach.
+# the Gerrit inputs and derives the one endpoint 'plan' may reach and
+# the ref 'plan' checks the change out against.
 #
 # Each isolation policy is DATA: the caller lists the checks it wants
 # in 'checks', and every check runs as its own named job, in parallel.
@@ -127,7 +128,9 @@ on:
       runs_on:
         description: >-
           Runner label for all jobs. Must name a Linux runner that
-          harden-runner can monitor, which rules out 'ubuntu-slim'.
+          harden-runner can monitor, which rules out 'ubuntu-slim',
+          with Python 3.10 or newer, which change-isolation-action
+          needs.
         required: false
         type: string
         default: 'ubuntu-latest'
@@ -186,6 +189,7 @@ jobs:
     permissions: {}
     outputs:
       endpoint: ${{ steps.endpoint.outputs.endpoint }}
+      ref: ${{ steps.endpoint.outputs.ref }}
     steps:
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
@@ -230,6 +234,36 @@ jobs:
               sys.exit(1)
 
 
+          def checkout_ref(branch):
+              # gerrit_to_platform passes a short name for a branch
+              # ('master') but the full ref for a change against any
+              # other ref ('refs/meta/config'). The value reaches
+              # 'git fetch' and never an annotation.
+              # C0, DEL and C1, as in has_control(); checked before
+              # isspace(), which covers U+0085 but not U+009B.
+              if any(
+                  ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F
+                  for char in branch
+              ):
+                  fail("gerrit_branch contains a control character")
+              if any(char.isspace() for char in branch):
+                  fail("gerrit_branch contains whitespace")
+              if (
+                  ".." in branch
+                  or "//" in branch
+                  or branch.startswith("-")
+                  or branch.endswith(("/", ".lock"))
+              ):
+                  fail(
+                      "gerrit_branch is not a valid ref name: it contains"
+                      " '..' or '//', starts with '-', or ends with '/'"
+                      " or '.lock'"
+                  )
+              if branch.startswith("refs/"):
+                  return branch
+              return f"refs/heads/{branch}"
+
+
           def endpoint(url):
               # The URL never reaches an annotation: it may hold
               # characters that would end or forge one.
@@ -269,10 +303,13 @@ jobs:
           if missing:
               fail(f"gerrit_refspec is set but missing: {' '.join(missing)}")
           result = endpoint(os.environ["GERRIT_URL"])
+          ref = checkout_ref(os.environ["GERRIT_BRANCH"])
           output = os.environ["GITHUB_OUTPUT"]
           with open(output, "a", encoding="utf-8") as handle:
               handle.write(f"endpoint={result}\n")
+              handle.write(f"ref={ref}\n")
           print(f"Gerrit endpoint: {result} ✅")
+          print(f"Gerrit ref: {ref} ✅")
           # END change_isolation_gerrit
           PYEOF
 
@@ -323,7 +360,8 @@ jobs:
           # a reusable workflow names the caller rather than the
           # project under review.
           repository: ${{ inputs.repository || github.repository }}
-          ref: refs/heads/${{ inputs.gerrit_branch }}
+          # A short branch name or a full ref, resolved by 'gerrit'.
+          ref: ${{ needs.gerrit.outputs.ref }}
           token: ${{ secrets.token || github.token }}
       - name: 'Checkout repository'
         if: inputs.gerrit_refspec == ''
@@ -728,21 +766,15 @@ jobs:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
           disable-telemetry: ${{ inputs.harden_runner_egress != 'audit' }}
-          # change-isolation-action v0.3.0 installs uv and pathspec at
-          # run time. Drop the four hosts after github.com once its pin
-          # moves to the release carrying
-          # lfreleng-actions/change-isolation-action#88.
+          # change-isolation-action runs on the runner's python3 and
+          # needs no host beyond GitHub's own.
           allowed-endpoints: >
             github.com:443
-            raw.githubusercontent.com:443
-            releases.astral.sh:443
-            pypi.org:443
-            files.pythonhosted.org:443
 
       - name: 'Check isolation'
         id: check
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/change-isolation-action@e3f14ac3bed7e5b402fe48bb2ab9fce83b268a77  # v0.3.0
+        uses: lfreleng-actions/change-isolation-action@5a002490ccc926a098f6c637e1f8363c5094999f  # v0.3.1
         with:
           paths: ${{ matrix.paths }}
           changed-files: ${{ needs.plan.outputs.changed_files }}

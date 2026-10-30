@@ -123,14 +123,27 @@ mirrors the `plan` input of `linting.yaml` on purpose.
 | `ref`                     | `string`  | `''`              | Ref to check out without a Gerrit refspec; empty is the run's commit |
 | `gerrit_refspec`          | `string`  | `''`              | Gerrit change under test; selects the Gerrit checkout                |
 | `gerrit_project`          | `string`  | `''`              | Gerrit project; also the project `INFO.yaml` must describe           |
-| `gerrit_branch`           | `string`  | `''`              | Branch the change targets                                            |
+| `gerrit_branch`           | `string`  | `''`              | Short branch name (`master`) or full ref (`refs/meta/config`)        |
 | `gerrit_url`              | `string`  | `''`              | Gerrit URL; falls back to the `GERRIT_URL` variable                  |
-| `runs_on`                 | `string`  | `ubuntu-latest`   | Linux runner harden-runner supports; not `ubuntu-slim`               |
+| `runs_on`                 | `string`  | `ubuntu-latest`   | Linux runner harden-runner supports, Python 3.10+; not `ubuntu-slim` |
 | `timeout_minutes`         | `number`  | `10`              | Timeout for each isolation leg and the `INFO.yaml` job               |
 | `harden_runner_egress`    | `string`  | `block`           | `block` or `audit`; see [Network egress](#network-egress)            |
 
 With `gerrit_refspec` set, `gerrit_project`, `gerrit_branch` and a
 Gerrit URL are mandatory, and the `gerrit` job fails without them.
+`gerrit_to_platform` sets `GERRIT_BRANCH` to the short name for a
+change against a branch (`master`), but to the full ref for a change
+against any other ref. The `gerrit` job hands `plan` the ref to check
+the change out against: a value starting with `refs/` as given, and
+`refs/heads/` plus the value otherwise. It fails, without echoing the value, on a
+`gerrit_branch` holding whitespace, a control character, `..` or
+`//`, starting with `-`, or ending in `/` or `.lock`.
+
+A project-configuration change, uploaded with
+`git push origin HEAD:refs/for/refs/meta/config`, arrives with
+`gerrit_branch` set to `refs/meta/config` and verifies like any other
+change: `plan` lists the files it touches, and a `.github/**` check
+finds none of its paths there and passes.
 The URL must be a plain `https://` URL; see
 [Network egress](#network-egress). With
 `gerrit_project` empty, `info-yaml-validate-action` reads the project
@@ -270,7 +283,7 @@ own. No job loads the organisation's shared allow-list.
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | `gerrit` (Gerrit mode) | `github.com:443`                                                                                                          |
 | `plan`                 | `github.com:443`, plus the Gerrit endpoint in Gerrit mode                                                                 |
-| `Isolation: <name>`    | `github.com:443`, `raw.githubusercontent.com:443`, `releases.astral.sh:443`, `pypi.org:443`, `files.pythonhosted.org:443` |
+| `Isolation: <name>`    | `github.com:443`                                                                                                          |
 | `INFO.yaml`            | `github.com:443`, `raw.githubusercontent.com:443`, `releases.astral.sh:443`, `pypi.org:443`, `files.pythonhosted.org:443` |
 | `report`               | `github.com:443`                                                                                                          |
 
@@ -278,11 +291,14 @@ own. No job loads the organisation's shared allow-list.
   so checkouts from GitHub and artifact upload and download need no
   entry. Each list names `github.com:443` anyway: harden-runner
   v2.22.2 warns whenever block mode meets an empty list.
-- The four hosts after `github.com` serve the `uv`, `pathspec` and
-  schema-validation installs that `change-isolation-action` and
-  `info-yaml-validate-action` make at run time. The isolation legs
-  drop them once the `change-isolation-action` pin moves to the
-  release containing lfreleng-actions/change-isolation-action#88.
+- The four hosts after `github.com` in the `INFO.yaml` row serve the
+  `uv` and schema-validation installs that `info-yaml-validate-action`
+  makes at run time.
+- The isolation legs install nothing: `change-isolation-action`
+  v0.3.1 runs on the runner's own `python3` with the standard library
+  alone. It needs Python 3.10 or newer, and fails with a clear
+  message otherwise. `ubuntu-latest` has it; a self-hosted runner
+  named in `runs_on` must provide it.
 - In block mode, `disable-telemetry` is on, since the telemetry host
   is not on any list.
 - In Gerrit mode, the `gerrit` job reads `gerrit_url`, or the
