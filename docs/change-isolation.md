@@ -123,7 +123,7 @@ mirrors the `plan` input of `linting.yaml` on purpose.
 | `ref`                     | `string`  | `''`              | Ref to check out without a Gerrit refspec; empty is the run's commit |
 | `gerrit_refspec`          | `string`  | `''`              | Gerrit change under test; selects the Gerrit checkout                |
 | `gerrit_project`          | `string`  | `''`              | Gerrit project; also the project `INFO.yaml` must describe           |
-| `gerrit_branch`           | `string`  | `''`              | Branch the change targets                                            |
+| `gerrit_branch`           | `string`  | `''`              | Short branch name (`master`) or full ref (`refs/meta/config`)        |
 | `gerrit_url`              | `string`  | `''`              | Gerrit URL; falls back to the `GERRIT_URL` variable                  |
 | `runs_on`                 | `string`  | `ubuntu-latest`   | Linux runner harden-runner supports; not `ubuntu-slim`               |
 | `timeout_minutes`         | `number`  | `10`              | Timeout for each isolation leg and the `INFO.yaml` job               |
@@ -131,6 +131,19 @@ mirrors the `plan` input of `linting.yaml` on purpose.
 
 With `gerrit_refspec` set, `gerrit_project`, `gerrit_branch` and a
 Gerrit URL are mandatory, and the `gerrit` job fails without them.
+`gerrit_to_platform` sets `GERRIT_BRANCH` to the short name for a
+change against a branch (`master`), but to the full ref for a change
+against any other ref. The `gerrit` job hands `plan` the ref to check
+the change out against: a value starting with `refs/` as given, and
+`refs/heads/` plus the value otherwise. It fails, without echoing the value, on a
+`gerrit_branch` holding whitespace, a control character, `..` or
+`//`, starting with `-`, or ending in `/` or `.lock`.
+
+A project-configuration change, uploaded with
+`git push origin HEAD:refs/for/refs/meta/config`, arrives with
+`gerrit_branch` set to `refs/meta/config` and verifies like any other
+change: `plan` lists the files it touches, and a `.github/**` check
+finds none of its paths there and passes.
 The URL must be a plain `https://` URL; see
 [Network egress](#network-egress). With
 `gerrit_project` empty, `info-yaml-validate-action` reads the project

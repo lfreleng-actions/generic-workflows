@@ -289,6 +289,62 @@ expect_gerrit_error 'newline' 'control character'
 run_gerrit 'https://gerrït.example.org'
 expect_gerrit_error 'non-ASCII host' 'non-ASCII'
 
+# expect_ref <gerrit_branch> <expected ref>
+expect_ref() {
+  local actual
+  run_gerrit 'https://gerrit.example.org' 'project' "$1"
+  actual=$(read_output_line "${gerrit_out}" ref)
+  if [ "${gerrit_rc}" -eq 0 ] && [ "${actual}" = "$2" ]; then
+    pass
+  else
+    fail "ref of $1: expected $2, got '${actual}'" "${gerrit_log}"
+  fi
+}
+
+expect_ref 'master' 'refs/heads/master'
+expect_ref 'refs/meta/config' 'refs/meta/config'
+expect_ref 'refs/heads/master' 'refs/heads/master'
+expect_ref 'release/1.2' 'refs/heads/release/1.2'
+
+# expect_ref_error <label> <gerrit_branch> <substring of the message>:
+# the message must not echo the value.
+expect_ref_error() {
+  run_gerrit 'https://gerrit.example.org' 'project' "$2"
+  expect_gerrit_error "$1" "$3"
+  if grep -qF -- "$2" <<< "${gerrit_log}"; then
+    fail "$1: the error echoes the branch" "${gerrit_log}"
+  fi
+}
+
+expect_ref_error 'branch with a space' 'my branch' 'contains whitespace'
+expect_ref_error 'branch with a tab' "$(printf 'my\tbranch')" \
+  'contains a control character'
+expect_ref_error 'branch with a newline' \
+  "$(printf 'main\n::warning::x')" 'contains a control character'
+expect_ref_error 'branch with DEL' "$(printf 'ma\177in')" \
+  'contains a control character'
+expect_ref_error 'branch with BEL' "$(printf 'ma\007in')" \
+  'contains a control character'
+# C1 controls, U+0080 to U+009F, as UTF-8. U+009B is a one-character
+# CSI escape.
+expect_ref_error 'branch with U+0085' "$(printf 'ma\302\205in')" \
+  'contains a control character'
+expect_ref_error 'branch with U+009B' "$(printf 'ma\302\233in')" \
+  'contains a control character'
+expect_ref_error 'branch with U+009F' "$(printf 'ma\302\237in')" \
+  'contains a control character'
+# U+00A0 is whitespace to str.isspace(), not a control.
+expect_ref_error 'branch with U+00A0' "$(printf 'ma\302\240in')" \
+  'contains whitespace'
+expect_ref "$(printf 'r\303\251sum\303\251')" \
+  "refs/heads/$(printf 'r\303\251sum\303\251')"
+expect_ref_error 'branch with ..' 'release/../main' 'not a valid ref'
+expect_ref_error 'branch with //' 'release//1.2' 'not a valid ref'
+expect_ref_error 'leading hyphen' '-main' 'not a valid ref'
+expect_ref_error 'trailing slash' 'release/' 'not a valid ref'
+expect_ref_error 'trailing .lock' 'main.lock' 'not a valid ref'
+expect_ref_error 'bare refs/' 'refs/' 'not a valid ref'
+
 run_gerrit 'https://gerrit.example.org' '' ''
 expect_gerrit_error 'project and branch missing' \
   'missing: gerrit_project gerrit_branch'
