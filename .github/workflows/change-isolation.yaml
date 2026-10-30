@@ -128,7 +128,9 @@ on:
       runs_on:
         description: >-
           Runner label for all jobs. Must name a Linux runner that
-          harden-runner can monitor, which rules out 'ubuntu-slim'.
+          harden-runner can monitor, which rules out 'ubuntu-slim',
+          with Python 3.10 or newer, which change-isolation-action
+          needs.
         required: false
         type: string
         default: 'ubuntu-latest'
@@ -764,21 +766,15 @@ jobs:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
           disable-telemetry: ${{ inputs.harden_runner_egress != 'audit' }}
-          # change-isolation-action v0.3.0 installs uv and pathspec at
-          # run time. Drop the four hosts after github.com once its pin
-          # moves to the release carrying
-          # lfreleng-actions/change-isolation-action#88.
+          # change-isolation-action runs on the runner's python3 and
+          # needs no host beyond GitHub's own.
           allowed-endpoints: >
             github.com:443
-            raw.githubusercontent.com:443
-            releases.astral.sh:443
-            pypi.org:443
-            files.pythonhosted.org:443
 
       - name: 'Check isolation'
         id: check
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/change-isolation-action@e3f14ac3bed7e5b402fe48bb2ab9fce83b268a77  # v0.3.0
+        uses: lfreleng-actions/change-isolation-action@5a002490ccc926a098f6c637e1f8363c5094999f  # v0.3.1
         with:
           paths: ${{ matrix.paths }}
           changed-files: ${{ needs.plan.outputs.changed_files }}

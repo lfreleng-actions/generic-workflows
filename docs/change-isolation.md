@@ -125,7 +125,7 @@ mirrors the `plan` input of `linting.yaml` on purpose.
 | `gerrit_project`          | `string`  | `''`              | Gerrit project; also the project `INFO.yaml` must describe           |
 | `gerrit_branch`           | `string`  | `''`              | Short branch name (`master`) or full ref (`refs/meta/config`)        |
 | `gerrit_url`              | `string`  | `''`              | Gerrit URL; falls back to the `GERRIT_URL` variable                  |
-| `runs_on`                 | `string`  | `ubuntu-latest`   | Linux runner harden-runner supports; not `ubuntu-slim`               |
+| `runs_on`                 | `string`  | `ubuntu-latest`   | Linux runner harden-runner supports, Python 3.10+; not `ubuntu-slim` |
 | `timeout_minutes`         | `number`  | `10`              | Timeout for each isolation leg and the `INFO.yaml` job               |
 | `harden_runner_egress`    | `string`  | `block`           | `block` or `audit`; see [Network egress](#network-egress)            |
 
@@ -283,7 +283,7 @@ own. No job loads the organisation's shared allow-list.
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | `gerrit` (Gerrit mode) | `github.com:443`                                                                                                          |
 | `plan`                 | `github.com:443`, plus the Gerrit endpoint in Gerrit mode                                                                 |
-| `Isolation: <name>`    | `github.com:443`, `raw.githubusercontent.com:443`, `releases.astral.sh:443`, `pypi.org:443`, `files.pythonhosted.org:443` |
+| `Isolation: <name>`    | `github.com:443`                                                                                                          |
 | `INFO.yaml`            | `github.com:443`, `raw.githubusercontent.com:443`, `releases.astral.sh:443`, `pypi.org:443`, `files.pythonhosted.org:443` |
 | `report`               | `github.com:443`                                                                                                          |
 
@@ -291,11 +291,14 @@ own. No job loads the organisation's shared allow-list.
   so checkouts from GitHub and artifact upload and download need no
   entry. Each list names `github.com:443` anyway: harden-runner
   v2.22.2 warns whenever block mode meets an empty list.
-- The four hosts after `github.com` serve the `uv`, `pathspec` and
-  schema-validation installs that `change-isolation-action` and
-  `info-yaml-validate-action` make at run time. The isolation legs
-  drop them once the `change-isolation-action` pin moves to the
-  release containing lfreleng-actions/change-isolation-action#88.
+- The four hosts after `github.com` in the `INFO.yaml` row serve the
+  `uv` and schema-validation installs that `info-yaml-validate-action`
+  makes at run time.
+- The isolation legs install nothing: `change-isolation-action`
+  v0.3.1 runs on the runner's own `python3` with the standard library
+  alone. It needs Python 3.10 or newer, and fails with a clear
+  message otherwise. `ubuntu-latest` has it; a self-hosted runner
+  named in `runs_on` must provide it.
 - In block mode, `disable-telemetry` is on, since the telemetry host
   is not on any list.
 - In Gerrit mode, the `gerrit` job reads `gerrit_url`, or the
