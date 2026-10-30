@@ -187,6 +187,8 @@ would make every check pass.
 
 The reusable casts no vote. Voting stays in the caller, as
 [`examples/change-isolation/`](../examples/change-isolation/) shows:
+`visibility` checks that the voting account can read the change (see
+[Private changes](#private-changes-and-the-visibility-gate)),
 `prepare` clears the vote, this workflow runs, and `vote` reads the
 run's conclusion with `im-open/workflow-conclusion` and posts it with
 `lfreleng-actions/gerrit-review-action`. That keeps the Gerrit SSH key
@@ -200,10 +202,45 @@ explicit regardless. It does not recognise a timed-out job, so the
 examples vote `failure` whenever `prepare` or this workflow did not
 succeed and the conclusion still reads `success`.
 
+`vote` runs under `always()`, so a failed `prepare` or change
+isolation still earns a vote, provided `visibility` reported the
+change readable.
+
 The examples' concurrency group names the Gerrit project as well as
 the branch and Change-Id: Gerrit allows the same Change-Id in more
 than one project, and a central `.github` repository dispatches for
 every project.
+
+## Private changes and the visibility gate
+
+`gerrit_to_platform` dispatches the verify for every patchset,
+private changes included. The account that clears and sets the vote
+cannot read a private change, so without a gate `prepare` and `vote`
+fail with `Not found: <number>` and mail the author. GitHub holds no
+copy of a private change's refs either, so no account could check it
+out. Making the change public dispatches a fresh run, so skipping the
+private patchsets loses no verification.
+
+The examples start with a `visibility` job that runs
+[`gerrit-change-visible-action`](https://github.com/lfreleng-actions/gerrit-change-visible-action)
+in its default `ssh` mode, as the voting account with the voting
+account's key. Every later job needs it, and none runs unless it
+reports `visible` as `true`:
+
+| Case                                                    | `visibility`              | Later jobs                                         |
+| ------------------------------------------------------- | ------------------------- | -------------------------------------------------- |
+| Readable change                                         | succeeds, `visible=true`  | run as before                                      |
+| Private (unreadable) change                             | succeeds, `visible=false` | skipped: no vote, no failure email                 |
+| Gerrit unreachable, bad credential or unreadable answer | **fails**, no output      | skipped; the failed `visibility` job is the signal |
+
+A change is visible in any status, so merged and abandoned changes
+pass the gate. The action never reports a check it could not complete
+as "not visible": it fails the step instead.
+
+The gate defends the caller until the dispatcher stops sending private
+changes (lfit/releng-gerrit_to_platform#116, released in v0.4.0).
+Once the project's Gerrit runs that release, remove the `visibility`
+job and the `needs` and `if:` entries that name it.
 
 ## Security notes
 
@@ -260,6 +297,18 @@ own. No job loads the organisation's shared allow-list.
 
 Set `harden_runner_egress: audit` to diagnose a blocked connection:
 the jobs then log egress without blocking it.
+
+The callers in
+[`examples/change-isolation/`](../examples/change-isolation/) harden
+their own Gerrit-talking jobs (`visibility`, `prepare` and `vote`)
+differently. Each loads the organisation's Gerrit-servers list,
+`.github/harden-runner/lf-gerrit-servers/gerrit_servers.txt` in
+`lfreleng-actions/.github`, through `harden-runner-block-action` by
+explicit path, and runs harden-runner in block mode with telemetry off
+and that list alone. Those jobs talk to the project's Gerrit over SSH
+and to GitHub's own endpoints, which harden-runner always allows, and
+to nothing else. A project whose Gerrit is not on the list must add it
+there. The reusable keeps the per-job lists above.
 
 ## Migration
 
