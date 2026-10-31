@@ -1,0 +1,49 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# =============================================================================
+# Thin tox verify caller (self-test)
+# =============================================================================
+# This repository consumes its own reusable tox verify workflow, so
+# every pull request raised here runs the wiring shipped to consumers:
+# plan -> one 'Tox: <env>' leg per environment, each in block mode
+# behind the organisation allow-list, against the fixture in
+# tests/fixtures/tox/.
+#
+# A pull request cannot dispatch Gerrit mode, so the Gerrit checkout
+# (a full ref such as refs/meta/config included) and the plan's
+# rejection paths are covered offline by tests/test-tox-verify-plan.sh
+# instead.
+#
+# The reusable is referenced with the self-repository form ('$/'),
+# which resolves this repository at the commit already running, so the
+# branch's own copy runs. Consumers pin a released SHA instead, as
+# examples/tox-verify/ shows.
+#
+# The '-action' suffix is a local disambiguator: a caller in this
+# repository cannot share a file name with the reusable it calls.
+# =============================================================================
+name: 'Tox Verify (self) 🧪'
+
+# yamllint disable-line rule:truthy
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions: {}
+
+concurrency:
+  group: 'tox-verify-self-${{ github.ref }}'
+  cancel-in-progress: true
+
+jobs:
+  tox-verify:
+    name: 'Tox Verify (self)'
+    permissions:
+      contents: read
+    uses: $/.github/workflows/tox-verify.yaml
+    with:
+      tox_envs: '["fixture", "python"]'
+      path_prefix: 'tests/fixtures/tox'
+      harden_runner_egress: 'block'
