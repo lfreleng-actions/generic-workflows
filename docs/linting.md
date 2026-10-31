@@ -479,6 +479,22 @@ configuration is attacker-controlled.
   module arrives *as* PyYAML. `tests/test-lint-plan.sh` runs the
   resolver from a directory holding a hostile `yaml.py` and asserts
   no hijack.
+- **uv gets an absolute interpreter, and setup-uv runs outside the
+  checkout.** Neither `--no-config` nor `-I` stops uv running the
+  interpreter of a `.venv/` in the current directory or a parent: `-I`
+  is an option to whichever interpreter uv has already chosen. Plan
+  mode checks out the whole pull request, so a committed
+  `.venv/bin/python3` would run in place of the resolver. The step
+  resolves an interpreter once, with
+  `uv python find --system --no-project` from `RUNNER_TEMP`, and
+  passes it as `--python "$py"`; uv uses an absolute path as given.
+  setup-uv, one step earlier, runs the interpreter `uv python find`
+  returns in its working directory and reads `cache-dir` from a
+  `uv.toml` there, so its `working-directory` is `RUNNER_TEMP`, with
+  `UV_NO_CONFIG`, `UV_SYSTEM_PYTHON` and `UV_NO_PROJECT` set on the
+  step. `tests/test-lint-plan.sh` also runs the resolver beside a
+  `uv.toml` and `.venv/` and `.python-version` interpreters that
+  write a marker, and asserts a real plan and no marker.
 - **The job summary redacts `config_url`.** The accepted URL grammar
   admits a query string, which is how a private configuration
   commonly arrives — a presigned URL. The summary, which anyone able

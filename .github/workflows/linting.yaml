@@ -1694,12 +1694,33 @@ jobs:
             echo "primary_error=$primary_error"
           } >> "$GITHUB_OUTPUT"
 
+      # setup-uv runs 'uv python find' in its working directory and
+      # executes the interpreter it returns, and reads 'cache-dir'
+      # (and, without 'version', 'required-version') from a uv.toml
+      # or pyproject.toml there with its own parser. Its default
+      # working directory is the checkout, which in plan mode is the
+      # whole pull request: a committed '.venv/' would run here, one
+      # step before the resolver. RUNNER_TEMP is outside the checkout
+      # and not a parent of it; the env covers what uv itself would
+      # otherwise discover.
+      #
+      # 'cache-dependency-glob' resolves against the working
+      # directory too, and RUNNER_TEMP holds none of its files. The
+      # one package this job installs is pinned on the uv run line
+      # below, so no file should key the cache: an empty glob says
+      # so rather than logging 'No file matched'.
       - name: 'Set up uv'
         if: steps.locate.outputs.proceed == 'true'
         # yamllint disable-line rule:line-length
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        env:
+          UV_NO_CONFIG: '1'
+          UV_SYSTEM_PYTHON: '1'
+          UV_NO_PROJECT: '1'
         with:
           version: '0.13.4'
+          working-directory: ${{ runner.temp }}
+          cache-dependency-glob: ''
 
       - name: 'Resolve lint plan'
         id: resolve
@@ -1758,7 +1779,30 @@ jobs:
           #
           # Sparse mode is not exempt: config_path names a file that
           # gets checked out, and 'yaml.py' is a legal value for it.
-          uv run --no-project --no-config --with pyyaml==6.0.2 \
+          #
+          # '--python' with an ABSOLUTE path, found from RUNNER_TEMP.
+          # uv runs the interpreter of a '.venv/' in the current
+          # directory or any parent before it considers anything else,
+          # and neither '--no-config', '--no-project' nor '-I' changes
+          # that ('-I' is an option to whichever interpreter uv has
+          # already picked). Plan mode checks out the whole pull
+          # request here, so a committed '.venv/bin/python3' ran in
+          # place of the resolver, free to write has_work=false. uv
+          # takes an absolute '--python' as given. '--system' keeps
+          # the lookup itself off any '.venv', and UV_NO_CONFIG off
+          # any '.python-version'.
+          #
+          # Demonstrated: with a '.venv/' whose bin/python3 writes a
+          # marker, the command without '--python' wrote it; with
+          # '--python "$py"' it did not, and the resolver ran.
+          py="$(cd "$RUNNER_TEMP" &&
+            UV_NO_CONFIG=1 uv python find --system --no-project)"
+          if [ -z "$py" ]; then
+            echo '::error::uv found no system Python interpreter ❌'
+            exit 1
+          fi
+          uv run --no-project --no-config --python "$py" \
+            --with pyyaml==6.0.2 \
             python -I - <<'PYEOF'
           # BEGIN lint_plan (extracted by tests/test-lint-plan.sh)
           import base64
