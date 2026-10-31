@@ -1,0 +1,652 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Reusable tox verify workflow.
+#
+#   [gerrit] -> plan -> Tox: <env 1>   (matrix, one leg per env)
+#                   +> Tox: <env n>
+#
+# 'gerrit' runs in Gerrit mode alone (gerrit_refspec set): it checks
+# the Gerrit inputs and resolves the ref the legs check the change out
+# against, with the same script as the 'gerrit' job in
+# change-isolation.yaml. 'plan' validates the inputs and turns
+# 'tox_envs' into the matrix; it checks nothing out. Each 'Tox: <env>'
+# leg checks the change out and runs one tox environment through
+# lfreleng-actions/tox-run-action.
+#
+# Replaces gerrit-compose-required-tox-verify.yaml in
+# lfit/releng-reusable-workflows. See docs/tox-verify.md.
+#
+# Security posture:
+#   * The reusable casts no vote and holds no Gerrit SSH key; voting
+#     stays in the caller.
+#   * All variable data reaches 'run' blocks through 'env', never
+#     through expression interpolation.
+#   * No inline or URL pre-build script: 'pre_build_script' names a
+#     repository-owned '.sh' file, which tox-run-action validates.
+#   * Fails closed: an empty, duplicate or unsafe tox environment
+#     fails the plan, and with it every leg.
+#
+# Egress: every job starts with step-security/harden-runner, in block
+# mode unless harden_runner_egress is 'audit'.
+#   * 'gerrit' and 'plan' talk to GitHub alone, so they allow
+#     'github.com:443' and nothing else, as change-isolation.yaml
+#     does.
+#   * The tox legs run the project's own environments, which download
+#     whatever the project lists. They load the shared organisation
+#     allow-list through harden-runner-block-action, plus any
+#     supplemental list the caller names, as docs-workflows'
+#     docs-build.yaml does.
+name: '[R] Tox Verify 🧪'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_call:
+    inputs:
+      tox_envs:
+        description: >-
+          JSON array of tox environment names; each runs as its own
+          'Tox: <env>' job.
+        required: true
+        type: string
+      path_prefix:
+        description: 'Directory holding tox.ini, relative to the root'
+        required: false
+        type: string
+        default: '.'
+      python_version:
+        description: >-
+          Python version for tox; ignored when python_version_file is
+          set.
+        required: false
+        type: string
+        default: '3.12'
+      python_version_file:
+        description: >-
+          File holding the Python version (e.g. '.python-version' or
+          'pyproject.toml'), relative to the repository root. Takes
+          precedence over python_version.
+        required: false
+        type: string
+        default: ''
+      parallel:
+        description: >-
+          tox '--parallel' value: 'auto', 'all' or a positive number;
+          empty runs without '--parallel'.
+        required: false
+        type: string
+        default: 'auto'
+      pre_build_script:
+        description: >-
+          Repository-relative path of an executable '.sh' script to
+          run before tox; empty runs none.
+        required: false
+        type: string
+        default: ''
+
+      # --- Checkout target (defaults to the calling repository) ---
+      repository:
+        description: 'Repository to check out (owner/name); empty = caller'
+        required: false
+        type: string
+        default: ''
+      ref:
+        description: >-
+          Branch, tag or SHA to check out when no Gerrit refspec is
+          set; empty checks out the commit that triggered the run.
+        required: false
+        type: string
+        default: ''
+
+      # --- Gerrit-aware checkout (empty unless dispatched via Gerrit) ---
+      gerrit_refspec:
+        description: 'Gerrit refspec of the change under test'
+        required: false
+        type: string
+        default: ''
+      gerrit_project:
+        description: 'Gerrit project name'
+        required: false
+        type: string
+        default: ''
+      gerrit_branch:
+        description: >-
+          Gerrit branch the change targets: a short name ('master') or
+          a full ref ('refs/meta/config')
+        required: false
+        type: string
+        default: ''
+      gerrit_url:
+        description: 'Gerrit server URL (falls back to the GERRIT_URL variable)'
+        required: false
+        type: string
+        default: ''
+
+      # --- Runner selection and timeout ---
+      runs_on:
+        description: >-
+          Runner label for all jobs. Must name a Linux runner that
+          harden-runner can monitor, with pipx installed, which
+          tox-run-action needs; GitHub-hosted Ubuntu runners have it.
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+      timeout_minutes:
+        description: 'Timeout (minutes) for each tox job'
+        required: false
+        type: number
+        default: 30
+
+      # --- Runner hardening ---
+      harden_runner_egress:
+        description: "Harden-runner egress policy: 'block' or 'audit'"
+        required: false
+        type: string
+        default: 'block'
+      harden_runner_allowlist:
+        description: >-
+          Out-of-band harden-runner allow-list configuration for the
+          tox jobs
+        required: false
+        type: string
+        # yamllint disable-line rule:line-length
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
+      harden_runner_supplemental_allowlist:
+        description: >-
+          Extra harden-runner allow-list merged with
+          harden_runner_allowlist, in the same coordinate grammar
+        required: false
+        type: string
+        default: ''
+
+    secrets:
+      token:
+        description: >-
+          Token used to check out 'repository'; defaults to the job's
+          GITHUB_TOKEN. Supply one with read access when the target
+          is private, since GITHUB_TOKEN reaches the caller alone.
+        required: false
+
+permissions: {}
+
+# No concurrency block, deliberately: concurrency belongs to the
+# caller, which knows the change it runs for. See examples/tox-verify/
+# for the recommended group.
+
+jobs:
+  gerrit:
+    name: 'Gerrit endpoint'
+    # GitHub mode needs no Gerrit ref, so it spends no runner here;
+    # 'plan' accepts the skipped result.
+    if: inputs.gerrit_refspec != ''
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      ref: ${{ steps.endpoint.outputs.ref }}
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          disable-telemetry: ${{ inputs.harden_runner_egress != 'audit' }}
+          allowed-endpoints: >
+            github.com:443
+
+      # Fails Gerrit mode before any job checks anything out. The
+      # script is change-isolation.yaml's, byte for byte;
+      # tests/test-tox-verify-plan.sh fails when the two drift.
+      - name: 'Resolve Gerrit endpoint'
+        id: endpoint
+        env:
+          GERRIT_PROJECT: ${{ inputs.gerrit_project }}
+          GERRIT_BRANCH: ${{ inputs.gerrit_branch }}
+          # yamllint disable-line rule:line-length
+          GERRIT_URL: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+        run: |
+          # Resolve Gerrit endpoint
+          set -euo pipefail
+          # tests/test-tox-verify-plan.sh extracts the script between
+          # the BEGIN and END markers. '-I' as in the plan.
+          python3 -I - <<'PYEOF'
+          # BEGIN tox_verify_gerrit
+          import os
+          import re
+          import sys
+          from urllib.parse import urlsplit
+
+          LABEL = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\Z")
+          REQUIRED = (
+              ("gerrit_project", "GERRIT_PROJECT"),
+              ("gerrit_branch", "GERRIT_BRANCH"),
+              ("gerrit_url/GERRIT_URL", "GERRIT_URL"),
+          )
+
+
+          def fail(message):
+              print(f"::error::{message}")
+              sys.exit(1)
+
+
+          def checkout_ref(branch):
+              # gerrit_to_platform passes a short name for a branch
+              # ('master') but the full ref for a change against any
+              # other ref ('refs/meta/config'). The value reaches
+              # 'git fetch' and never an annotation.
+              # C0, DEL and C1, as in has_control(); checked before
+              # isspace(), which covers U+0085 but not U+009B.
+              if any(
+                  ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F
+                  for char in branch
+              ):
+                  fail("gerrit_branch contains a control character")
+              if any(char.isspace() for char in branch):
+                  fail("gerrit_branch contains whitespace")
+              if (
+                  ".." in branch
+                  or "//" in branch
+                  or branch.startswith("-")
+                  or branch.endswith(("/", ".lock"))
+              ):
+                  fail(
+                      "gerrit_branch is not a valid ref name: it contains"
+                      " '..' or '//', starts with '-', or ends with '/'"
+                      " or '.lock'"
+                  )
+              if branch.startswith("refs/"):
+                  return branch
+              return f"refs/heads/{branch}"
+
+
+          def endpoint(url):
+              # The URL never reaches an annotation: it may hold
+              # characters that would end or forge one.
+              if any(ord(char) <= 0x20 or ord(char) >= 0x7F for char in url):
+                  fail(
+                      "The Gerrit URL contains whitespace, a control"
+                      " character or a non-ASCII character"
+                  )
+              parts = urlsplit(url)
+              if parts.scheme != "https":
+                  fail("The Gerrit URL must start with https://")
+              if parts.query or parts.fragment or url.endswith(("?", "#")):
+                  fail("The Gerrit URL must carry no query or fragment")
+              netloc = parts.netloc
+              if "@" in netloc:
+                  fail("The Gerrit URL must carry no user information")
+              host, colon, port = netloc.partition(":")
+              if colon:
+                  if not port.isdigit() or not 0 < int(port) < 65536:
+                      fail("The Gerrit URL names an invalid port")
+                  port = str(int(port))
+              else:
+                  port = "443"
+              host = host.lower()
+              labels = host.split(".")
+              if len(host) > 253 or not all(
+                  LABEL.match(label) for label in labels
+              ):
+                  fail("The Gerrit URL names an invalid hostname")
+              return f"{host}:{port}"
+
+
+          missing = [
+              name for name, variable in REQUIRED
+              if not os.environ.get(variable, "")
+          ]
+          if missing:
+              fail(f"gerrit_refspec is set but missing: {' '.join(missing)}")
+          result = endpoint(os.environ["GERRIT_URL"])
+          ref = checkout_ref(os.environ["GERRIT_BRANCH"])
+          output = os.environ["GITHUB_OUTPUT"]
+          with open(output, "a", encoding="utf-8") as handle:
+              handle.write(f"endpoint={result}\n")
+              handle.write(f"ref={ref}\n")
+          print(f"Gerrit endpoint: {result} ✅")
+          print(f"Gerrit ref: {ref} ✅")
+          # END tox_verify_gerrit
+          PYEOF
+
+  plan:
+    name: 'Plan'
+    needs: gerrit
+    # A job that needs a skipped one is skipped too unless its 'if'
+    # says otherwise. 'gerrit' may be skipped only in GitHub mode.
+    # yamllint disable-line rule:line-length
+    if: ${{ !cancelled() && (needs.gerrit.result == 'success' || (inputs.gerrit_refspec == '' && needs.gerrit.result == 'skipped')) }}
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 5
+    # No checkout: the plan validates inputs alone.
+    permissions: {}
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          disable-telemetry: ${{ inputs.harden_runner_egress != 'audit' }}
+          allowed-endpoints: >
+            github.com:443
+
+      - name: 'Plan tox environments'
+        id: plan
+        env:
+          INPUT_TOX_ENVS: ${{ inputs.tox_envs }}
+          INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
+          INPUT_PARALLEL: ${{ inputs.parallel }}
+          INPUT_HARDEN_RUNNER_EGRESS: ${{ inputs.harden_runner_egress }}
+          INPUT_HARDEN_RUNNER_ALLOWLIST: ${{ inputs.harden_runner_allowlist }}
+          # yamllint disable-line rule:line-length
+          INPUT_HARDEN_RUNNER_SUPPLEMENTAL_ALLOWLIST: ${{ inputs.harden_runner_supplemental_allowlist }}
+        run: |
+          # Plan tox environments
+          set -euo pipefail
+          # tests/test-tox-verify-plan.sh extracts the script between
+          # the BEGIN and END markers. '-I' keeps the working
+          # directory off sys.path.
+          python3 -I - <<'PYEOF'
+          # BEGIN tox_verify_plan
+          import json
+          import os
+          import re
+          import secrets
+          import sys
+
+          MAX_ENVS = 256
+          MAX_ENV_LENGTH = 100
+          # Each name reaches tox-run-action's 'tox-envs' input, which
+          # the action splits on whitespace into 'tox -e <name>'. A
+          # comma would make one leg run several environments, and a
+          # leading '-' would read as an option.
+          ENV_NAME = re.compile(r"[A-Za-z0-9._+-]+\Z")
+          PATH_PREFIX = re.compile(r"[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*\Z")
+          # tox-run-action passes 'parallel' unquoted to '--parallel'.
+          PARALLEL = re.compile(r"(auto|all|[1-9][0-9]{0,3})?\Z")
+          errors = []
+
+
+          def error(message):
+              # Messages never carry an input value: one could end or
+              # forge a workflow command.
+              errors.append(message)
+              print(f"::error::{message}")
+
+
+          def has_control(text):
+              return any(
+                  ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F
+                  for char in text
+              )
+
+
+          def check_env(where, name):
+              if not isinstance(name, str):
+                  error(f"{where} must be a string")
+                  return False
+              if not name:
+                  error(f"{where} is empty")
+                  return False
+              if len(name) > MAX_ENV_LENGTH:
+                  error(f"{where} is longer than {MAX_ENV_LENGTH} characters")
+                  return False
+              # C0, DEL and C1, checked before isspace(), which covers
+              # U+0085 but not U+009B.
+              if has_control(name):
+                  error(f"{where} contains a control character")
+                  return False
+              if any(char.isspace() for char in name):
+                  error(f"{where} contains whitespace")
+                  return False
+              if "," in name:
+                  error(f"{where} contains a comma; list each environment")
+                  return False
+              if name.startswith("-"):
+                  error(f"{where} starts with '-'")
+                  return False
+              if not ENV_NAME.match(name):
+                  error(
+                      f"{where} contains a character outside letters,"
+                      " digits, '.', '_', '+' and '-'"
+                  )
+                  return False
+              return True
+
+
+          def parse_envs(raw):
+              try:
+                  envs = json.loads(raw)
+              except ValueError:
+                  error("tox_envs is not valid JSON")
+                  return []
+              if not isinstance(envs, list):
+                  error("tox_envs must be a JSON array of strings")
+                  return []
+              if not envs:
+                  error("tox_envs must name at least one environment")
+                  return []
+              if len(envs) > MAX_ENVS:
+                  error(
+                      f"tox_envs names {len(envs)} environments; a matrix"
+                      f" holds at most {MAX_ENVS}"
+                  )
+                  return []
+              plan = []
+              seen = {}
+              for index, name in enumerate(envs):
+                  where = f"tox_envs[{index}]"
+                  if not check_env(where, name):
+                      continue
+                  if name in seen:
+                      error(f"{where} duplicates tox_envs[{seen[name]}]")
+                      continue
+                  seen[name] = index
+                  plan.append(name)
+              return plan
+
+
+          def check_path_prefix(value):
+              # tox-run-action changes into this directory, so an
+              # absolute path or a '..' segment could leave the
+              # checkout. A single trailing slash is tolerated.
+              value = value[:-1] if value.endswith("/") else value
+              if value == ".":
+                  return
+              if (
+                  not PATH_PREFIX.match(value)
+                  or ".." in value.split("/")
+              ):
+                  error(
+                      "path_prefix must be a relative path inside the"
+                      " repository, made of letters, digits, '.', '_'"
+                      " and '-', with no '..' segment"
+                  )
+
+
+          def check_policy(environ):
+              if not PARALLEL.match(environ.get("INPUT_PARALLEL", "")):
+                  error(
+                      "parallel must be 'auto', 'all', a positive number"
+                      " or empty"
+                  )
+              egress = environ.get("INPUT_HARDEN_RUNNER_EGRESS", "")
+              if egress not in ("block", "audit"):
+                  error("harden_runner_egress must be 'block' or 'audit'")
+              # harden-runner-block-action merges a supplemental list
+              # into the baseline, so it rejects one with no baseline.
+              if environ.get(
+                  "INPUT_HARDEN_RUNNER_SUPPLEMENTAL_ALLOWLIST", ""
+              ) and not environ.get("INPUT_HARDEN_RUNNER_ALLOWLIST", ""):
+                  error(
+                      "harden_runner_supplemental_allowlist is set but"
+                      " harden_runner_allowlist is empty; a supplemental"
+                      " list extends the baseline"
+                  )
+
+
+          def write_output(handle, name, value):
+              delimiter = f"EOF_{secrets.token_hex(16)}"
+              handle.write(f"{name}<<{delimiter}\n{value}\n{delimiter}\n")
+
+
+          plan = parse_envs(os.environ.get("INPUT_TOX_ENVS", ""))
+          check_path_prefix(os.environ.get("INPUT_PATH_PREFIX", ""))
+          check_policy(os.environ)
+
+          if errors:
+              print(f"Plan failed with {len(errors)} error(s) ❌")
+              sys.exit(1)
+
+          # Every name passed ENV_NAME, so none can start a workflow
+          # command or break the summary table.
+          for name in plan:
+              print(f"  tox env: {name}")
+
+          output = os.environ["GITHUB_OUTPUT"]
+          with open(output, "a", encoding="utf-8") as handle:
+              write_output(
+                  handle,
+                  "matrix",
+                  json.dumps({"tox_env": plan}, separators=(",", ":")),
+              )
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as handle:
+                  handle.write("## Tox verify plan\n\n")
+                  handle.write("| Tox environment |\n| --- |\n")
+                  for name in plan:
+                      handle.write(f"| `{name}` |\n")
+          print(f"Planned {len(plan)} tox environment(s) ✅")
+          # END tox_verify_plan
+          PYEOF
+
+  tox:
+    name: 'Tox: ${{ matrix.tox_env }}'
+    needs: [gerrit, plan]
+    # The default 'if' skips a job when any job earlier in its chain
+    # was skipped, and 'gerrit' is skipped in GitHub mode, so this job
+    # tests the plan's own result instead.
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    permissions:
+      contents: read
+    strategy:
+      # Every environment reports, whatever another one found.
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+          # yamllint disable-line rule:line-length
+          supplemental_config: ${{ inputs.harden_runner_supplemental_allowlist }}
+          # A caller naming a list depends on it, so its absence fails
+          # here rather than at the first blocked connection.
+          # yamllint disable-line rule:line-length
+          supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
+          # The list is the same in every leg; summarise it once.
+          # yamllint disable-line rule:line-length
+          allow_list_summary: ${{ strategy.job-index == 0 && 'true' || 'false' }}
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Checkout Gerrit change'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        with:
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          # The action defaults this to github.repository, which inside
+          # a reusable workflow names the caller rather than the
+          # project under review.
+          repository: ${{ inputs.repository || github.repository }}
+          # A short branch name or a full ref, resolved by 'gerrit'.
+          ref: ${{ needs.gerrit.outputs.ref }}
+          token: ${{ secrets.token || github.token }}
+      # The Gerrit action checks out with persist-credentials: true and
+      # offers no way to turn it off, so the token stays readable until
+      # the post-job cleanup. The pre-build script and tox run the
+      # change's own code, so the token goes before they start.
+      - name: 'Remove checkout credentials'
+        if: inputs.gerrit_refspec != ''
+        shell: bash
+        run: |
+          # Remove checkout credentials
+          set -euo pipefail
+          # tests/test-tox-verify-plan.sh extracts the script between
+          # the BEGIN and END markers.
+          # BEGIN tox_verify_drop_credentials
+          # actions/checkout writes the token to a
+          # git-credentials-*.config file, pulled into .git/config by
+          # includeIf entries; older releases set an extraheader in
+          # .git/config itself. Remove both forms, and never print a
+          # value: it is the token.
+          while IFS= read -r -d '' entry; do
+            key=${entry%%$'\n'*}
+            value=${entry#*$'\n'}
+            case "${value##*/}" in
+              git-credentials-*.config)
+                rm -f -- "${value}"
+                git config --local --unset-all "${key}" || [ $? -eq 5 ]
+                ;;
+            esac
+          done < <(git config --local -z --get-regexp \
+            '^includeif\..*\.path$' || true)
+          while IFS= read -r -d '' key; do
+            git config --local --unset-all "${key}" || [ $? -eq 5 ]
+          done < <(git config --local -z --name-only --get-regexp \
+            '^http\..*\.extraheader$' || true)
+          # Read the effective configuration, includes and all, so a
+          # form missed above fails the leg instead of reaching tox.
+          if git config --get-regexp '^http\..*\.extraheader$' \
+            > /dev/null; then
+            echo "::error::Checkout credentials remain in the git" \
+              "configuration; refusing to run the change's code"
+            exit 1
+          fi
+          echo "Checkout credentials removed ✅"
+          # END tox_verify_drop_credentials
+      - name: 'Checkout repository'
+        if: inputs.gerrit_refspec == ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+          token: ${{ secrets.token || github.token }}
+
+      - name: 'Run tox'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/tox-run-action@2820cd45d9bc61216e8cddb84158c55c7781d321  # v0.2.0
+        with:
+          path_prefix: ${{ inputs.path_prefix }}
+          # tox-run-action hands both to actions/setup-python, which
+          # uses python-version and ignores the file when both are
+          # set. Sending the version only without a file lets the file
+          # override the '3.12' default.
+          # yamllint disable-line rule:line-length
+          python-version: ${{ inputs.python_version_file == '' && inputs.python_version || '' }}
+          python-version-file: ${{ inputs.python_version_file }}
+          tox-envs: ${{ matrix.tox_env }}
+          parallel: ${{ inputs.parallel }}
+          pre-build-script: ${{ inputs.pre_build_script }}

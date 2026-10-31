@@ -235,3 +235,18 @@ repos:
         pass_filenames: false
         # yamllint disable-line rule:line-length
         files: '^(\.github/workflows/change-isolation\.yaml|tests/test-change-isolation-plan\.sh)$'
+
+  # Fixtures for the tox verify Gerrit and plan scripts. The test
+  # extracts both from the workflow, and compares the Gerrit script
+  # with change-isolation.yaml's, so it runs whenever either workflow
+  # or the fixtures change. 'language: system' with an explicit bash,
+  # as for the change isolation fixtures above.
+  - repo: local
+    hooks:
+      - id: tox-verify-fixtures
+        name: Tox verify plan fixtures
+        entry: bash tests/test-tox-verify-plan.sh
+        language: system
+        pass_filenames: false
+        # yamllint disable-line rule:line-length
+        files: '^(\.github/workflows/(tox-verify|change-isolation)\.yaml|tests/test-tox-verify-plan\.sh)$'
