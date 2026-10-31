@@ -427,6 +427,40 @@ skip every later job for a private one. Copy a caller from
 rules, the visibility gate, and the migration from the legacy
 workflows.
 
+## Tox verify reusable workflow
+
+[`.github/workflows/tox-verify.yaml`](.github/workflows/tox-verify.yaml)
+runs a project's tox environments, one `Tox: <env>` job each, against
+a Gerrit change or a GitHub commit. A plan job validates `tox_envs`
+first and fails on an empty, duplicate or unsafe entry. Each tox job
+runs in block mode behind the organisation egress allow-list. The
+workflow replaces `gerrit-compose-required-tox-verify.yaml` in
+`lfit/releng-reusable-workflows`.
+
+```yaml
+jobs:
+  tox-verify:
+    name: 'Tox Verify'
+    permissions:
+      contents: read
+    # Pin a real generic-workflows release SHA in place of <SHA>.
+    uses: lfreleng-actions/generic-workflows/.github/workflows/tox-verify.yaml@<SHA>
+    with:
+      tox_envs: '["lint", "docs"]'
+      gerrit_refspec: ${{ inputs.GERRIT_REFSPEC }}
+      gerrit_project: ${{ inputs.GERRIT_PROJECT }}
+      gerrit_branch: ${{ inputs.GERRIT_BRANCH }}
+```
+
+As with change isolation, the reusable casts no vote, and the Gerrit
+example caller checks that the voting account can read the change
+first. Copy a caller from
+[`examples/tox-verify/`](examples/tox-verify/), and see
+[`docs/tox-verify.md`](docs/tox-verify.md) for the inputs, the
+`tox_envs` rules, the egress allow-lists, and the migration from the
+legacy workflow, including its dropped inline and URL pre-build
+scripts.
+
 ## Caller filenames
 
 A consuming repository names its callers after the reusable it calls:
@@ -435,19 +469,21 @@ A consuming repository names its callers after the reusable it calls:
 repository carry an `-action` suffix (`release-action.yaml`,
 `semantic-pull-request-action.yaml`, `linting-action.yaml`,
 `clear-action-cache-action.yaml`, `autolabeler-action.yaml`,
-`change-isolation-action.yaml`) because a caller here cannot share a
-filename with the reusable it calls. Do not copy that suffix into a
-consuming repository. Gerrit verify callers, such as the change
-isolation examples, follow gerrit_to_platform's naming instead: the
-filename must contain both `gerrit` and `verify`.
+`change-isolation-action.yaml`, `tox-verify-action.yaml`) because a
+caller here cannot share a filename with the reusable it calls. Do not
+copy that suffix into a consuming repository. Gerrit verify callers,
+such as the change isolation and tox verify examples, follow
+gerrit_to_platform's naming instead: the filename must contain both
+`gerrit` and `verify`.
 
 ## Gerrit support
 
 Gerrit-mirrored projects use these workflows unchanged. Apart from
-change isolation, none of the reusables here takes Gerrit *checkout*
-inputs, and none performs a dual checkout. The release reusable keeps
-`require_gerrit`, which verifies a tag's signing key against a Gerrit
-account and has nothing to do with checkout.
+change isolation and tox verify, none of the reusables here takes
+Gerrit *checkout* inputs, and none performs a dual checkout. The
+release reusable keeps `require_gerrit`, which verifies a tag's
+signing key against a Gerrit account and has nothing to do with
+checkout.
 
 That deviates from the sibling reusables in `python-workflows`,
 `node-workflows` and the rest, which run per patchset. Those accept a
@@ -470,11 +506,11 @@ read. The autolabeler is out for the same reason, having no pull
 request to label. The linting reusable takes no Gerrit checkout
 inputs; a Gerrit project calls it from a `push` trigger on the mirror.
 
-Change isolation is the exception, because it runs per patchset:
-gerrit_to_platform dispatches its caller for each change, and the
-reusable checks that change out with `checkout-gerrit-change-action`
-whenever the caller passes `gerrit_refspec`, and falls back to a normal
-checkout otherwise.
+Change isolation and tox verify are the exceptions, because they run
+per patchset: gerrit_to_platform dispatches their callers for each
+change, and each reusable checks that change out with
+`checkout-gerrit-change-action` whenever the caller passes
+`gerrit_refspec`, and falls back to a normal checkout otherwise.
 
 ## Design
 
@@ -484,8 +520,9 @@ workflow's full input/output reference and job graph,
 the semantic pull request reusable workflow, and
 [`docs/linting.md`](docs/linting.md) for the linting reusable
 workflow, [`docs/autolabeler.md`](docs/autolabeler.md) for the
-autolabeler, and [`docs/change-isolation.md`](docs/change-isolation.md)
-for change isolation.
+autolabeler, [`docs/change-isolation.md`](docs/change-isolation.md)
+for change isolation, and [`docs/tox-verify.md`](docs/tox-verify.md)
+for tox verify.
 
 [pre-commit.ci results page]: https://results.pre-commit.ci/latest/github/lfreleng-actions/generic-workflows/main
 [pre-commit.ci status badge]: https://results.pre-commit.ci/badge/github/lfreleng-actions/generic-workflows/main.svg
