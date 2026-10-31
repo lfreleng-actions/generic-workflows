@@ -55,6 +55,8 @@ rules:
       - github.yaml:90
       - github.yaml:83
       - github.yaml:103
+      - gerrit-tox-verify.yaml:211
+      - github-tox-verify.yaml:45
 
   stale-action-refs:
     ignore:
@@ -81,6 +83,8 @@ rules:
       - github.yaml:90
       - github.yaml:83
       - github.yaml:103
+      - gerrit-tox-verify.yaml:211
+      - github-tox-verify.yaml:45
 
   secrets-outside-env:
     ignore:
@@ -103,3 +107,8 @@ rules:
       - gerrit-info-yaml-only.yaml:164
       - gerrit-info-yaml-only.yaml:196
       - gerrit-info-yaml-only.yaml:264
+      # The Gerrit tox verify example hands the same key to the same
+      # two actions, for the same reason.
+      - gerrit-tox-verify.yaml:162
+      - gerrit-tox-verify.yaml:194
+      - gerrit-tox-verify.yaml:259

@@ -1,0 +1,52 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# =============================================================================
+# EXAMPLE: GitHub pull request tox verify caller
+# =============================================================================
+# Copy this file into your project's .github/workflows/ directory as
+# tox-verify.yaml and pin the `uses:` ref to a generic-workflows
+# release SHA. Each entry in tox_envs runs as its own 'Tox: <env>' job
+# against the pull request's merge commit.
+#
+# DEPLOYMENT NOTES:
+#   * Needs no secrets. The checkout reads the calling repository with
+#     the workflow token, which this caller grants 'contents: read'.
+#   * The tox jobs block egress except to the organisation allow-list,
+#     which carries PyPI. A project whose environments reach any other
+#     host names a supplemental list in
+#     harden_runner_supplemental_allowlist.
+#   * pre_build_script names an executable '.sh' file in the
+#     repository; tox-run-action refuses anything else.
+# =============================================================================
+name: 'Tox Verify 🧪'
+
+# yamllint disable-line rule:truthy
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions: {}
+
+# One run per pull request: a new push cancels the run for the last.
+concurrency:
+  group: 'tox-verify-${{ github.ref }}'
+  cancel-in-progress: true
+
+jobs:
+  tox-verify:
+    name: 'Tox Verify'
+    permissions:
+      contents: read
+    # REPLACE the pinned SHA below with a generic-workflows release SHA.
+    # The all-zero SHA is a non-functional placeholder, NOT a real commit.
+    # yamllint disable-line rule:line-length
+    uses: lfreleng-actions/generic-workflows/.github/workflows/tox-verify.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
+    with:
+      tox_envs: '["lint", "py312"]'
+      # Optional; the defaults are shown.
+      # path_prefix: '.'
+      # python_version: '3.12'
+      # parallel: 'auto'
+      # pre_build_script: 'scripts/pre-build.sh'

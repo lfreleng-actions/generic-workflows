@@ -29,6 +29,12 @@ paths:
       # the same way; see that comment.
       # yamllint disable-line rule:line-length
       - 'reusable workflow call "\$/\.github/workflows/change\-isolation\.yaml" at "uses" is not following the format'
+  .github/workflows/tox-verify-action.yaml:
+    ignore:
+      # Same self-repository form as the callers above, and excused
+      # the same way; see the autolabeler comment.
+      # yamllint disable-line rule:line-length
+      - 'reusable workflow call "\$/\.github/workflows/tox\-verify\.yaml" at "uses" is not following the format'
   .github/workflows/clear-action-cache-action.yaml:
     ignore:
       # GitHub's self-repository reference ('$/', July 2026) resolves
