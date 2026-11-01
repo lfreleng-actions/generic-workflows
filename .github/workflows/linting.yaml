@@ -1694,12 +1694,33 @@ jobs:
             echo "primary_error=$primary_error"
           } >> "$GITHUB_OUTPUT"
 
+      # Outside the checkout. setup-uv runs 'uv python find
+      # --directory <working-directory>' and then EXECUTES the
+      # interpreter it returns, so in the checkout a committed
+      # '.venv/' or a '.python-version' naming an executable ran
+      # before the resolver, able to write has_work=false. It also
+      # reads 'cache-dir' from a 'uv.toml' there with its own parser.
+      # RUNNER_TEMP is neither the checkout nor a parent of it, and
+      # the UV_* variables stop uv itself reading config or project
+      # files or selecting a virtual environment for that probe.
+      #
+      # 'cache-dependency-glob' resolves against working-directory,
+      # where none of its files exist, so it is empty. The key is
+      # unchanged: the job installs only the PyYAML pinned on the
+      # 'uv run' line, and the sparse checkout matched none of the
+      # default patterns anyway.
       - name: 'Set up uv'
         if: steps.locate.outputs.proceed == 'true'
         # yamllint disable-line rule:line-length
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        env:
+          UV_NO_CONFIG: '1'
+          UV_SYSTEM_PYTHON: '1'
+          UV_NO_PROJECT: '1'
         with:
           version: '0.13.4'
+          working-directory: ${{ runner.temp }}
+          cache-dependency-glob: ''
 
       - name: 'Resolve lint plan'
         id: resolve
@@ -1758,7 +1779,28 @@ jobs:
           #
           # Sparse mode is not exempt: config_path names a file that
           # gets checked out, and 'yaml.py' is a legal value for it.
+          #
+          # '--python "$py"', picked once from RUNNER_TEMP. Neither
+          # '--no-project' nor '--no-config' stops 'uv run' choosing
+          # the interpreter of a '.venv/' in the current directory or
+          # any parent, and '-I' applies only once uv has chosen one:
+          # a committed '.venv/bin/python' ran before the resolver
+          # and could write has_work=false. uv uses an absolute
+          # '--python' as given, so the checkout cannot pick it.
+          #
+          # Demonstrated with uv 0.13.4: beside a planted '.venv/',
+          # the previous command executed its interpreter; with
+          # '--python' from 'uv python find --system' it did not.
+          py="$(cd "$RUNNER_TEMP" &&
+            UV_NO_CONFIG=1 uv python find --system --no-project)" ||
+            py=''
+          if [ -z "$py" ]; then
+            echo '::error::No system Python interpreter found for' \
+              'the lint plan resolver'
+            exit 1
+          fi
           uv run --no-project --no-config --with pyyaml==6.0.2 \
+            --python "$py" \
             python -I - <<'PYEOF'
           # BEGIN lint_plan (extracted by tests/test-lint-plan.sh)
           import base64

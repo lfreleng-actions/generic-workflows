@@ -479,6 +479,30 @@ configuration is attacker-controlled.
   module arrives *as* PyYAML. `tests/test-lint-plan.sh` runs the
   resolver from a directory holding a hostile `yaml.py` and asserts
   no hijack.
+- **uv never runs an interpreter from the checkout.** Neither
+  `--no-project` nor `--no-config` stops `uv run` choosing the
+  interpreter of a `.venv/` in the current directory or any parent,
+  and `-I` takes effect after uv has chosen one. A committed
+  `.venv/bin/python` would then run ahead of the resolver, free to
+  write `has_work=false` and exit 0. So the resolve step
+  picks the interpreter once, with `uv python find --system
+  --no-project` run from `RUNNER_TEMP` under `UV_NO_CONFIG=1`, fails
+  when it finds none, and passes it to `uv run` as an absolute
+  `--python`, which uv uses as given. `Set up uv` runs with
+  `working-directory` set to `RUNNER_TEMP`, neither the checkout nor
+  a parent of it, and with `UV_NO_CONFIG`, `UV_SYSTEM_PYTHON` and
+  `UV_NO_PROJECT` set: setup-uv runs `uv python find --directory`
+  on its working directory and executes the result, so a `.venv/` or
+  a `.python-version` naming an executable ran there too, and it
+  reads `cache-dir` from a `uv.toml` there with its own parser. Its
+  `cache-dependency-glob` is empty, since it would resolve against
+  `RUNNER_TEMP`; the cache key does not change, because the `uv run`
+  line pins the one package the job installs and the sparse checkout
+  matched none of the default patterns.
+  `tests/test-lint-plan-interpreter.sh` runs the step beside a
+  planted `.venv/`, `.python-version` and `uv.toml`, asserts a real
+  plan and no planted interpreter run, and shows the previous
+  command does run one.
 - **The job summary redacts `config_url`.** The accepted URL grammar
   admits a query string, which is how a private configuration
   commonly arrives — a presigned URL. The summary, which anyone able
