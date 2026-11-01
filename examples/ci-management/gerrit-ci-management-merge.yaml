@@ -1,0 +1,276 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# =============================================================================
+# EXAMPLE: Gerrit ci-management merge caller
+# =============================================================================
+# gerrit_to_platform dispatches this workflow when a change merges in
+# a ci-management repository's Gerrit. It checks that the commenting
+# account can read the change, comments that the run started, runs
+# the reusable ci-management merge workflow (which pushes the Jenkins
+# jobs when the change merged to the deploy branch), and comments the
+# result on the change. It never votes: the change has merged.
+#
+# FILE NAME: gerrit_to_platform discovers a workflow by its file name.
+# A copy MUST keep both 'gerrit' and 'merge' in its name, as this
+# file's name does, and MUST NOT contain 'required':
+# gerrit_to_platform keeps such names for the required workflows it
+# dispatches from an organisation's '.github' repository, and does
+# not dispatch them from the project.
+#
+# DEPLOY BRANCH: the caller MUST pass deploy_branch, the branch
+# Jenkins deploys from; the reusable has no default. A merge to any
+# other branch, refs/meta/config included, deploys nothing and
+# succeeds.
+#
+# CONCURRENCY: merges to the deploy branch share one group keyed to
+# the repository, so updates of one Jenkins never run --delete-old at
+# once. GitHub keeps one pending run per group: a newer deploy-branch
+# merge cancels an older pending one rather than queueing behind it.
+# Nothing is lost, because the newer run checks out the deploy
+# branch's tip, whose tree carries both changes. A merge to any other
+# branch deploys nothing, so it takes a group of its own run and can
+# never cancel a pending deployment. cancel-in-progress stays false,
+# so a running update always finishes.
+#
+# DEPLOYMENT NOTES:
+#   * Copy this file into the ci-management repository's
+#     .github/workflows/. TARGET_REPO then stays empty and the
+#     caller's own repository is checked out.
+#   * Set the repository or organisation variables GERRIT_SERVER,
+#     GERRIT_SSH_USER, GERRIT_KNOWN_HOSTS, JENKINS_URL and
+#     JOBBUILDER_PROD_USR, and the secrets GERRIT_SSH_PRIVKEY and
+#     JOBBUILDER_PROD_PSW. The 'visibility', 'notify' and 'report'
+#     jobs read the Gerrit ones to reach Gerrit over SSH; the reusable
+#     reads the Jenkins ones.
+#   * 'visibility', 'notify' and 'report' block egress except to the
+#     hosts in the organisation's Gerrit-servers allow-list
+#     (.github/harden-runner/lf-gerrit-servers/gerrit_servers.txt in
+#     lfreleng-actions/.github). A project Gerrit missing from that
+#     list is blocked; add it there.
+#   * The reusable's 'Update' job blocks egress except to the
+#     organisation allow-list and the Jenkins host in JENKINS_URL. A
+#     host a submodule needs that is missing from the list needs
+#     harden_runner_supplemental_allowlist.
+#
+# Jobs, in order:
+#   visibility            can the commenting account read the change?
+#   notify                comment that the run started
+#   ci-management-merge   the reusable workflow
+#   report                comment the result
+#
+# The 'visibility' job gates every later job, as in the verify
+# example: an unreadable change skips them, and a failed check is the
+# signal on its own. A failed start comment does not hold the deploy
+# back; the result comment reports it as a failure.
+#
+# Commenting lives here rather than in the reusable workflow, so the
+# reusable never receives the Gerrit SSH key.
+# =============================================================================
+name: 'Gerrit CI Management Merge'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_dispatch:
+    inputs:
+      GERRIT_BRANCH:
+        description: 'Branch that change is against'
+        required: true
+        type: string
+      GERRIT_CHANGE_ID:
+        description: 'The ID for the change'
+        required: true
+        type: string
+      GERRIT_CHANGE_NUMBER:
+        description: 'The Gerrit number'
+        required: true
+        type: string
+      GERRIT_CHANGE_URL:
+        description: 'URL to the change'
+        required: true
+        type: string
+      GERRIT_EVENT_TYPE:
+        description: 'Type of Gerrit event'
+        required: true
+        type: string
+      GERRIT_PATCHSET_NUMBER:
+        description: 'The patch number for the change'
+        required: true
+        type: string
+      GERRIT_PATCHSET_REVISION:
+        description: 'The revision sha'
+        required: true
+        type: string
+      GERRIT_PROJECT:
+        description: 'Project in Gerrit'
+        required: true
+        type: string
+      GERRIT_REFSPEC:
+        description: 'Gerrit refspec of change'
+        required: true
+        type: string
+      TARGET_REPO:
+        description: 'GitHub repository to deploy from (owner/name)'
+        required: false
+        type: string
+        default: ''
+
+concurrency:
+  # One Jenkins per repository: see CONCURRENCY above. REPLACE
+  # 'master' in both places with deploy_branch below. GitHub's '=='
+  # ignores case, so a branch named like it in another case (say
+  # 'Master') would join the deploy group; keep no such branch.
+  # yamllint disable-line rule:line-length
+  group: ci-management-merge-${{ inputs.TARGET_REPO || github.repository }}-${{ (inputs.GERRIT_BRANCH == 'master' || inputs.GERRIT_BRANCH == 'refs/heads/master') && 'deploy' || github.run_id }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  # Remove this job, and the 'visibility' needs and conditions below,
+  # once the project's Gerrit runs a gerrit_to_platform release with
+  # the dispatcher fix (lfit/releng-gerrit_to_platform#116, v0.4.0),
+  # which stops dispatching private changes.
+  visibility:
+    name: 'Change visibility'
+    runs-on: ubuntu-latest
+    # The check travels to Gerrit over SSH, so GITHUB_TOKEN needs no
+    # scopes.
+    permissions: {}
+    timeout-minutes: 5
+    outputs:
+      visible: ${{ steps.check.outputs.visible }}
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        with:
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lf-gerrit-servers/gerrit_servers.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: block
+          disable-telemetry: true
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      # The default 'ssh' mode asks as the commenting account. A
+      # refused credential, an unreachable server or an unreadable
+      # answer fails this step rather than reporting 'false'.
+      - name: 'Is the change visible to the commenting account?'
+        id: check
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/gerrit-change-visible-action@fa327eebc2b217aa23a42e3da4096109a009a4ed  # v0.0.2
+        with:
+          gerrit-change-number: ${{ inputs.GERRIT_CHANGE_NUMBER }}
+          host: ${{ vars.GERRIT_SERVER }}
+          username: ${{ vars.GERRIT_SSH_USER }}
+          key: ${{ secrets.GERRIT_SSH_PRIVKEY }}
+          known_hosts: ${{ vars.GERRIT_KNOWN_HOSTS }}
+
+  notify:
+    name: 'Notify start'
+    needs: visibility
+    if: needs.visibility.outputs.visible == 'true'
+    runs-on: ubuntu-latest
+    # Comments travel to Gerrit over SSH, so GITHUB_TOKEN needs no
+    # scopes.
+    permissions: {}
+    timeout-minutes: 5
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        with:
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lf-gerrit-servers/gerrit_servers.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: block
+          disable-telemetry: true
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      - name: 'Comment that the run started'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/gerrit-review-action@d56b0b5c81402f8cb435aaca513bebdea3be951e  # v1.2.0
+        with:
+          host: ${{ vars.GERRIT_SERVER }}
+          username: ${{ vars.GERRIT_SSH_USER }}
+          key: ${{ secrets.GERRIT_SSH_PRIVKEY }}
+          known_hosts: ${{ vars.GERRIT_KNOWN_HOSTS }}
+          gerrit-change-number: ${{ inputs.GERRIT_CHANGE_NUMBER }}
+          gerrit-patchset-number: ${{ inputs.GERRIT_PATCHSET_NUMBER }}
+          vote-type: clear
+          comment-only: 'true'
+
+  ci-management-merge:
+    name: 'CI Management Merge'
+    needs: [visibility, notify]
+    # A failed start comment must not hold the deploy back; 'report'
+    # still reports it.
+    if: ${{ !cancelled() && needs.visibility.outputs.visible == 'true' }}
+    permissions:
+      contents: read
+    # REPLACE the pinned SHA below with a generic-workflows release SHA.
+    # The all-zero SHA is a non-functional placeholder, NOT a real commit.
+    # yamllint disable-line rule:line-length
+    uses: lfreleng-actions/generic-workflows/.github/workflows/ci-management-merge.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
+    with:
+      repository: ${{ inputs.TARGET_REPO }}
+      gerrit_branch: ${{ inputs.GERRIT_BRANCH }}
+      merged_revision: ${{ inputs.GERRIT_PATCHSET_REVISION }}
+      # REPLACE with the branch Jenkins deploys from, and keep the
+      # concurrency group above in step.
+      deploy_branch: 'master'
+      jenkins_url: ${{ vars.JENKINS_URL }}
+      jenkins_user: ${{ vars.JOBBUILDER_PROD_USR }}
+      # workers (0, one per CPU), delete_old (true), path_prefix ('.')
+      # and jjb_path ('jjb') suit the usual layout.
+    secrets:
+      jenkins_password: ${{ secrets.JOBBUILDER_PROD_PSW }}
+
+  report:
+    name: 'Report result'
+    # always() keeps a failed 'notify' or 'ci-management-merge' from
+    # skipping the report; the visibility test still skips it when the
+    # change is unreadable or the check itself failed.
+    if: ${{ always() && needs.visibility.outputs.visible == 'true' }}
+    needs: [visibility, notify, ci-management-merge]
+    runs-on: ubuntu-latest
+    permissions: {}
+    timeout-minutes: 5
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        with:
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lf-gerrit-servers/gerrit_servers.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: block
+          disable-telemetry: true
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      - name: 'Comment the result'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/gerrit-review-action@d56b0b5c81402f8cb435aaca513bebdea3be951e  # v1.2.0
+        with:
+          host: ${{ vars.GERRIT_SERVER }}
+          username: ${{ vars.GERRIT_SSH_USER }}
+          key: ${{ secrets.GERRIT_SSH_PRIVKEY }}
+          known_hosts: ${{ vars.GERRIT_KNOWN_HOSTS }}
+          gerrit-change-number: ${{ inputs.GERRIT_CHANGE_NUMBER }}
+          gerrit-patchset-number: ${{ inputs.GERRIT_PATCHSET_NUMBER }}
+          # Built from the jobs' results: any cancelled job reports
+          # CANCELLED; a failed, timed-out or skipped one FAILURE; and
+          # only all three succeeding reports SUCCESS.
+          # yamllint disable-line rule:line-length
+          vote-type: ${{ contains(needs.*.result, 'cancelled') && 'cancelled' || ((contains(needs.*.result, 'failure') || contains(needs.*.result, 'skipped')) && 'failure' || 'success') }}
+          comment-only: 'true'
