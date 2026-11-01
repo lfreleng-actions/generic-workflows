@@ -495,6 +495,48 @@ the caller from
 [`docs/ci-management-verify.md`](docs/ci-management-verify.md) for the
 inputs, the credential handling, and the migration of each consumer.
 
+## CI management merge reusable workflow
+
+[`.github/workflows/ci-management-merge.yaml`](.github/workflows/ci-management-merge.yaml)
+pushes a ci-management repository's Jenkins jobs to Jenkins after a
+change merges. A plan job validates every input and decides whether
+to deploy: a merge to `deploy_branch` deploys, and a merge to any
+other branch succeeds without touching Jenkins. The `Update` job
+waits until the GitHub mirror's branch holds the merged revision,
+failing after about five minutes rather than deploying a tree without
+it, checks out the exact commit that passed with its submodules, and
+runs Jenkins Job Builder in update mode. The workflow replaces
+`gerrit-ci-management-merge.yaml` in `lfit/releng-reusable-workflows`.
+
+```yaml
+jobs:
+  ci-management-merge:
+    name: 'CI Management Merge'
+    permissions:
+      contents: read
+    # Pin a real generic-workflows release SHA in place of <SHA>.
+    uses: lfreleng-actions/generic-workflows/.github/workflows/ci-management-merge.yaml@<SHA>
+    with:
+      gerrit_branch: ${{ inputs.GERRIT_BRANCH }}
+      merged_revision: ${{ inputs.GERRIT_PATCHSET_REVISION }}
+      deploy_branch: 'master'
+      jenkins_url: ${{ vars.JENKINS_URL }}
+      jenkins_user: ${{ vars.JOBBUILDER_PROD_USR }}
+    secrets:
+      jenkins_password: ${{ secrets.JOBBUILDER_PROD_PSW }}
+```
+
+The reusable posts no comment and sets no concurrency group: the
+Gerrit example caller comments on the change, and keys the group of
+deploy-branch merges to the repository so two updates never overlap.
+This repository has no self-caller for it, since a pull request has
+no Jenkins to update.
+Copy the caller from
+[`examples/ci-management/`](examples/ci-management/), and see
+[`docs/ci-management-merge.md`](docs/ci-management-merge.md) for the
+inputs, the deploy-branch rule, the ancestry check, and the migration
+of each consumer.
+
 ## Caller filenames
 
 A consuming repository names its callers after the reusable it calls:
@@ -511,6 +553,8 @@ isolation, tox verify and ci-management verify examples, follow
 gerrit_to_platform's naming instead: the filename must contain both
 `gerrit` and `verify`, and must not contain `required`, which
 gerrit_to_platform keeps for an organisation's required workflows.
+The ci-management merge example follows the same rule with `merge` in
+place of `verify`.
 
 ## Gerrit support
 
@@ -550,6 +594,11 @@ that change out with
 `checkout-gerrit-change-action` whenever the caller passes
 `gerrit_refspec`, and falls back to a normal checkout otherwise.
 
+The ci-management merge reusable takes `gerrit_branch` and
+`merged_revision` but checks out no change: gerrit_to_platform
+dispatches its caller when a change merges, and it deploys the
+mirror's deploy branch once that branch holds the merged revision.
+
 ## Design
 
 See [`docs/release.md`](docs/release.md) for the release reusable
@@ -560,9 +609,11 @@ the semantic pull request reusable workflow, and
 workflow, [`docs/autolabeler.md`](docs/autolabeler.md) for the
 autolabeler, [`docs/change-isolation.md`](docs/change-isolation.md)
 for change isolation, [`docs/tox-verify.md`](docs/tox-verify.md)
-for tox verify, and
+for tox verify,
 [`docs/ci-management-verify.md`](docs/ci-management-verify.md) for
-ci-management verify.
+ci-management verify, and
+[`docs/ci-management-merge.md`](docs/ci-management-merge.md) for
+ci-management merge.
 
 [pre-commit.ci results page]: https://results.pre-commit.ci/latest/github/lfreleng-actions/generic-workflows/main
 [pre-commit.ci status badge]: https://results.pre-commit.ci/badge/github/lfreleng-actions/generic-workflows/main.svg

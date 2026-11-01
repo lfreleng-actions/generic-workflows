@@ -18,6 +18,8 @@ generates its Jenkins jobs with Jenkins Job Builder (JJB). It replaces
 The workflow follows [`tox-verify.yaml`](tox-verify.md) wherever this
 page says nothing different: the same Gerrit inputs, ref resolution,
 hardening inputs and checkout token handling.
+Its merge counterpart, which pushes the jobs to Jenkins once a change
+merges, is [`ci-management-merge.yaml`](ci-management-merge.md).
 
 ## Job graph
 
