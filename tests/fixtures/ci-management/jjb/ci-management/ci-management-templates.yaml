@@ -1,0 +1,14 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# The one job template in the fixture. It uses no JJB-specific YAML
+# tag, so the fixture's check-yaml hook can read it.
+
+- job-template:
+    name: '{project-name}-fixture-verify'
+    description: 'Fixture job for the ci-management verify self-test'
+    node: '{build-node}'
+    project-type: freestyle
+    builders:
+      - shell: 'echo "Verifying {project-name}"'

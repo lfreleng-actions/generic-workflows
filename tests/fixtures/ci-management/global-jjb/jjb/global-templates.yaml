@@ -1,0 +1,16 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Stands in for lfit/releng-global-jjb, which a ci-management
+# repository carries as a submodule at its root and links into its
+# JJB tree as jjb/global-jjb -> ../global-jjb/jjb. JJB reads this
+# file only through that link; see the self-test's comments.
+
+- job-template:
+    name: '{project-name}-global-verify'
+    description: 'Fixture job from the global templates'
+    node: '{build-node}'
+    project-type: freestyle
+    builders:
+      - shell: 'echo "Global verify for {project-name}"'
