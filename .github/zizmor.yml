@@ -57,6 +57,7 @@ rules:
       - github.yaml:103
       - gerrit-tox-verify.yaml:211
       - github-tox-verify.yaml:45
+      - gerrit-ci-management-verify.yaml:223
 
   stale-action-refs:
     ignore:
@@ -85,6 +86,7 @@ rules:
       - github.yaml:103
       - gerrit-tox-verify.yaml:211
       - github-tox-verify.yaml:45
+      - gerrit-ci-management-verify.yaml:223
 
   secrets-outside-env:
     ignore:
@@ -112,3 +114,8 @@ rules:
       - gerrit-tox-verify.yaml:162
       - gerrit-tox-verify.yaml:194
       - gerrit-tox-verify.yaml:259
+      # The Gerrit ci-management verify example hands the same key to
+      # the same two actions, for the same reason.
+      - gerrit-ci-management-verify.yaml:174
+      - gerrit-ci-management-verify.yaml:206
+      - gerrit-ci-management-verify.yaml:267
