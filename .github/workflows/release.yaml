@@ -173,7 +173,7 @@ jobs:
       # the first would win, and audit mode would be unreachable.
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
         with:
           config: ${{ inputs.harden_runner_allowlist }}
       - name: 'Harden runner'
@@ -199,7 +199,7 @@ jobs:
       - name: 'Verify pushed tag'
         id: 'tag-validate'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/tag-validate-action@63470621b8ebc5c4fc86ebb616727dd0a7285dd9  # v1.1.7
+        uses: lfreleng-actions/tag-validate-action@eab7d92e02c8b447a4de04e68bd5ee7eae3450eb  # v1.1.8
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           require_type: ${{ inputs.require_type }}
@@ -258,7 +258,7 @@ jobs:
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           allow_list_summary: 'false'

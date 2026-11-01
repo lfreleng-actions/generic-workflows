@@ -452,7 +452,7 @@ jobs:
         # too, and under 'block' a failure still stops the job.
         continue-on-error: ${{ inputs.harden_runner_egress != 'block' }}
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
         with:
           config: ${{ inputs.harden_runner_allowlist }}
 
@@ -1697,7 +1697,7 @@ jobs:
       - name: 'Set up uv'
         if: steps.locate.outputs.proceed == 'true'
         # yamllint disable-line rule:line-length
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         with:
           version: '0.13.4'
 
@@ -3202,7 +3202,7 @@ jobs:
         # Fatal under 'block' alone, as in the plan job.
         continue-on-error: ${{ inputs.harden_runner_egress != 'block' }}
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           # The plan job's summary already shows the list; repeat it
@@ -3507,7 +3507,7 @@ jobs:
         # and names the stage. So a green check from this workflow no
         # longer depends on whether an exclusion happened to be set.
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/standalone-linting-action@c63239ab493b3ddb506524143c34a723880d3e3c  # v0.8.0
+        uses: lfreleng-actions/standalone-linting-action@a00b2febdcb6da5332f77e829dfdc131a91b8fce  # v0.10.1
         with:
           hooks: ${{ matrix.hooks }}
           # Forwarded to EVERY task, so an exclusion is a policy for
