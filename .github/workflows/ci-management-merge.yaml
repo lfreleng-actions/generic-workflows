@@ -1,0 +1,690 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Reusable ci-management merge workflow.
+#
+#   plan -> Update
+#
+# After a change merges, push the repository's Jenkins Job Builder
+# (JJB) tree to Jenkins. 'plan' validates the inputs; it checks
+# nothing out. It decides whether to deploy: only a merge to the
+# branch Jenkins deploys from does. 'Update' first waits, in a scratch
+# bare repository, until the GitHub mirror's deploy branch carries the
+# merged revision; then it checks out that branch tip's exact commit
+# with its submodules, once, and pushes the jobs through
+# lfreleng-actions/jjb-action in update mode.
+#
+# Replaces gerrit-ci-management-merge.yaml in
+# lfit/releng-reusable-workflows. See docs/ci-management-merge.md.
+#
+# Security posture:
+#   * The reusable posts no comment, casts no vote and holds no Gerrit
+#     SSH key; notification stays in the caller.
+#   * All variable data reaches 'run' blocks through 'env', never
+#     through expression interpolation.
+#   * The jenkins_password secret reaches the jjb-action step alone,
+#     through 'with:'. The checkout persists no token, and the wait's
+#     scratch repository, which holds the job token, is deleted.
+#   * A merge to any branch other than deploy_branch deploys nothing,
+#     so another branch's definitions never replace production jobs,
+#     and --delete-old never removes jobs on its behalf.
+#   * A tree without the merged revision is never deployed: 'Update'
+#     fails instead once the mirror has had about five minutes.
+#   * Fails closed: an invalid input fails the plan, before any
+#     checkout.
+#
+# Egress: every job starts with step-security/harden-runner, in block
+# mode unless harden_runner_egress is 'audit'.
+#   * 'plan' talks to GitHub alone, so it allows 'github.com:443' and
+#     nothing else.
+#   * 'Update' fetches the repository and its submodules, Python and
+#     JJB's packages. It loads the shared organisation allow-list
+#     through harden-runner-block-action, plus any supplemental list
+#     the caller names, as tox-verify.yaml does, and adds the Jenkins
+#     host the plan resolved from jenkins_url.
+name: '[R] CI Management Merge 🏗️'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_call:
+    inputs:
+      # --- What merged, and where Jenkins deploys from ---
+      gerrit_branch:
+        description: >-
+          Branch the change merged to: a short name ('master') or a
+          full ref ('refs/heads/master', 'refs/meta/config')
+        required: true
+        type: string
+      merged_revision:
+        description: >-
+          Commit that merged (40 hex digits); the deployed tree must
+          contain it
+        required: true
+        type: string
+      deploy_branch:
+        description: >-
+          Branch Jenkins deploys from, short or full; a merge to any
+          other branch deploys nothing
+        required: true
+        type: string
+
+      # --- Jenkins ---
+      jenkins_url:
+        description: >-
+          Jenkins URL: https://, a DNS host name, an optional port and
+          path, and no credentials, query or fragment
+        required: true
+        type: string
+      jenkins_user:
+        description: 'Jenkins user the update runs as'
+        required: true
+        type: string
+      workers:
+        description: 'JJB --workers, 0 to 64; 0 means one per CPU'
+        required: false
+        type: number
+        default: 0
+      delete_old:
+        description: >-
+          Pass --delete-old, removing managed jobs the tree no longer
+          defines
+        required: false
+        type: boolean
+        default: true
+
+      # --- Tree ---
+      path_prefix:
+        description: >-
+          Root of the ci-management tree, relative to the repository
+          root; JJB runs from it.
+        required: false
+        type: string
+        default: '.'
+      jjb_path:
+        description: 'JJB tree, relative to path_prefix'
+        required: false
+        type: string
+        default: 'jjb'
+
+      # --- Checkout target (defaults to the calling repository) ---
+      repository:
+        description: 'Repository to check out (owner/name); empty = caller'
+        required: false
+        type: string
+        default: ''
+
+      # --- Runner selection and timeout ---
+      runs_on:
+        description: >-
+          Runner label for all jobs. Must name a Linux runner that
+          harden-runner can monitor; GitHub-hosted Ubuntu runners
+          qualify.
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+      timeout_minutes:
+        description: 'Timeout (minutes) for the Update job'
+        required: false
+        type: number
+        default: 30
+
+      # --- Runner hardening ---
+      harden_runner_egress:
+        description: "Harden-runner egress policy: 'block' or 'audit'"
+        required: false
+        type: string
+        default: 'block'
+      harden_runner_allowlist:
+        description: >-
+          Out-of-band harden-runner allow-list configuration for the
+          Update job
+        required: false
+        type: string
+        # yamllint disable-line rule:line-length
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
+      harden_runner_supplemental_allowlist:
+        description: >-
+          Extra harden-runner allow-list merged with
+          harden_runner_allowlist, in the same coordinate grammar
+        required: false
+        type: string
+        default: ''
+
+    secrets:
+      jenkins_password:
+        description: 'Password or API token of jenkins_user'
+        required: true
+
+permissions: {}
+
+# No concurrency block, deliberately: concurrency belongs to the
+# caller, which knows which merges share a Jenkins. See
+# examples/ci-management/ for the recommended group.
+
+jobs:
+  plan:
+    name: 'Plan'
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 5
+    # No checkout: the plan validates inputs alone.
+    permissions: {}
+    outputs:
+      deploy: ${{ steps.plan.outputs.deploy }}
+      ref: ${{ steps.plan.outputs.ref }}
+      revision: ${{ steps.plan.outputs.revision }}
+      jenkins_endpoint: ${{ steps.plan.outputs.jenkins_endpoint }}
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          disable-telemetry: ${{ inputs.harden_runner_egress != 'audit' }}
+          allowed-endpoints: >
+            github.com:443
+
+      - name: 'Validate inputs'
+        id: plan
+        env:
+          INPUT_GERRIT_BRANCH: ${{ inputs.gerrit_branch }}
+          INPUT_DEPLOY_BRANCH: ${{ inputs.deploy_branch }}
+          INPUT_MERGED_REVISION: ${{ inputs.merged_revision }}
+          INPUT_JENKINS_URL: ${{ inputs.jenkins_url }}
+          INPUT_JENKINS_USER: ${{ inputs.jenkins_user }}
+          INPUT_WORKERS: ${{ inputs.workers }}
+          INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
+          INPUT_JJB_PATH: ${{ inputs.jjb_path }}
+          INPUT_REPOSITORY: ${{ inputs.repository }}
+          INPUT_HARDEN_RUNNER_EGRESS: ${{ inputs.harden_runner_egress }}
+          INPUT_HARDEN_RUNNER_ALLOWLIST: ${{ inputs.harden_runner_allowlist }}
+          # yamllint disable-line rule:line-length
+          INPUT_HARDEN_RUNNER_SUPPLEMENTAL_ALLOWLIST: ${{ inputs.harden_runner_supplemental_allowlist }}
+        run: |
+          # Validate inputs
+          set -euo pipefail
+          # tests/test-ci-management-merge-plan.sh extracts the script
+          # between the BEGIN and END markers. '-I' keeps the working
+          # directory off sys.path.
+          python3 -I - <<'PYEOF'
+          # BEGIN ci_management_merge_plan
+          import os
+          import re
+          import sys
+
+          HEX40 = re.compile(r"[0-9a-fA-F]{40}\Z")
+          WORKERS = re.compile(r"(0|[1-9][0-9]?)\Z")
+          PORT = re.compile(r"[1-9][0-9]{0,4}\Z")
+          REPOSITORY = re.compile(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+\Z")
+          # jjb-action v0.0.1's scripts/validate.sh accepts these
+          # labels; the plan never accepts a host it would refuse.
+          LABEL = r"[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?"
+          HOST = re.compile(rf"{LABEL}(\.{LABEL})*\.?\Z")
+          # Characters git forbids in a ref name, and '@{'.
+          REF_FORBIDDEN = set("~^:?*[\\")
+          NOT_DNS = (
+              "jenkins_url must name its host by DNS name, not an IP"
+              " literal"
+          )
+
+          errors = []
+
+
+          def error(message):
+              # Messages never carry an input value: one could end or
+              # forge a workflow command, and jenkins_url may be
+              # mistyped with a credential in it.
+              errors.append(message)
+              print(f"::error::{message}")
+
+
+          def has_control(text):
+              # C0, DEL and C1. Checked before isspace(), which covers
+              # U+0085 but not U+009B.
+              return any(
+                  ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F
+                  for char in text
+              )
+
+
+          def check_path(name, value):
+              # As ci-management-verify.yaml: both paths reach
+              # jjb-action, which changes into them. An absolute path
+              # or a '..' segment could leave the checkout, and a
+              # leading '-' would read as an option.
+              if not value:
+                  error(f"{name} is empty")
+              elif has_control(value):
+                  error(f"{name} contains a control character")
+              elif any(char.isspace() for char in value):
+                  error(f"{name} contains whitespace")
+              elif value.startswith("/"):
+                  error(f"{name} must be a relative path")
+              elif value.startswith("-"):
+                  error(f"{name} starts with '-'")
+              elif ".." in value.split("/"):
+                  error(f"{name} contains a '..' segment")
+
+
+          def full_ref(name, value):
+              # The ref rules of the 'gerrit' script in
+              # change-isolation.yaml, plus git check-ref-format's own
+              # rules: a short name ('master') or a full ref. Returns
+              # the full ref, or None after reporting the problem.
+              if not value:
+                  error(f"{name} is empty")
+              elif has_control(value):
+                  error(f"{name} contains a control character")
+              elif any(char.isspace() for char in value):
+                  error(f"{name} contains whitespace")
+              elif (
+                  ".." in value
+                  or value.startswith("-")
+                  or value.endswith(".")
+                  or value == "@"
+                  or any(
+                      not part
+                      or part.startswith(".")
+                      or part.endswith(".lock")
+                      for part in value.split("/")
+                  )
+              ):
+                  # git check-ref-format: an empty component covers a
+                  # leading, trailing or doubled '/'.
+                  error(
+                      f"{name} is not a valid ref name: it contains"
+                      " '..' or an empty component, starts with '-',"
+                      " ends with '.', is '@', or has a component that"
+                      " starts with '.' or ends with '.lock'"
+                  )
+              elif REF_FORBIDDEN.intersection(value) or "@{" in value:
+                  error(f"{name} contains a character git forbids in a ref")
+              elif value.startswith("refs/"):
+                  return value
+              else:
+                  return f"refs/heads/{value}"
+              return None
+
+
+          def jenkins_endpoint(url):
+              # Returns 'host:port' for the Update job's egress
+              # allow-list, or None after reporting the problem.
+              message = "jenkins_url must be an https:// URL with a host"
+              if not url:
+                  error("jenkins_url is empty")
+                  return None
+              if any(ord(char) <= 0x20 or ord(char) >= 0x7F for char in url):
+                  error(
+                      "jenkins_url contains whitespace, a control character"
+                      " or a non-ASCII character"
+                  )
+                  return None
+              if not url.startswith("https://"):
+                  error(message)
+                  return None
+              rest = url[len("https://"):]
+              if "?" in rest or "#" in rest:
+                  error("jenkins_url must carry no query or fragment")
+                  return None
+              authority = rest.split("/", 1)[0]
+              if "@" in authority:
+                  error("jenkins_url must carry no user information")
+                  return None
+              if "[" in authority or "]" in authority:
+                  error(NOT_DNS)
+                  return None
+              host, colon, port = authority.partition(":")
+              if not HOST.match(host):
+                  error(message)
+                  return None
+              # A top-level label never starts with a digit, so this
+              # refuses a dotted IPv4 address and its shorter or hex
+              # spellings ('127.1', '0x7f000001') alike.
+              host = host.rstrip(".").lower()
+              if not host.rsplit(".", 1)[-1][0].isalpha():
+                  error(NOT_DNS)
+                  return None
+              if colon:
+                  if not PORT.match(port) or int(port) > 65535:
+                      error("jenkins_url has an invalid port")
+                      return None
+              else:
+                  port = "443"
+              return f"{host}:{port}"
+
+
+          def check_user(value):
+              # jjb-action writes the user to an ini file, which strips
+              # surrounding whitespace and reads a new line as a
+              # continuation.
+              if not value:
+                  error("jenkins_user is empty")
+              elif has_control(value):
+                  error("jenkins_user contains a control character")
+              elif value != value.strip():
+                  error("jenkins_user starts or ends with whitespace")
+
+
+          def check_repository(value):
+              # The wait builds the fetch URL from it and sends the
+              # job's token there, so it must name one repository on
+              # the server: 'owner/name', or empty for the caller.
+              if value and (
+                  not REPOSITORY.match(value)
+                  or value.split("/")[1] in (".", "..")
+              ):
+                  error("repository must be empty or 'owner/name'")
+
+
+          def check_policy(environ):
+              egress = environ.get("INPUT_HARDEN_RUNNER_EGRESS", "")
+              if egress not in ("block", "audit"):
+                  error("harden_runner_egress must be 'block' or 'audit'")
+              # harden-runner-block-action merges a supplemental list
+              # into the baseline, so it rejects one with no baseline.
+              if environ.get(
+                  "INPUT_HARDEN_RUNNER_SUPPLEMENTAL_ALLOWLIST", ""
+              ) and not environ.get("INPUT_HARDEN_RUNNER_ALLOWLIST", ""):
+                  error(
+                      "harden_runner_supplemental_allowlist is set but"
+                      " harden_runner_allowlist is empty; a supplemental"
+                      " list extends the baseline"
+                  )
+
+
+          environ = os.environ
+          merged = full_ref(
+              "gerrit_branch", environ.get("INPUT_GERRIT_BRANCH", "")
+          )
+          deploy = full_ref(
+              "deploy_branch", environ.get("INPUT_DEPLOY_BRANCH", "")
+          )
+          if deploy is not None and not deploy.startswith("refs/heads/"):
+              error("deploy_branch must name a branch, not another kind of ref")
+              deploy = None
+          revision = environ.get("INPUT_MERGED_REVISION", "")
+          if not HEX40.match(revision):
+              error("merged_revision must be a commit SHA of 40 hex digits")
+          endpoint = jenkins_endpoint(environ.get("INPUT_JENKINS_URL", ""))
+          check_user(environ.get("INPUT_JENKINS_USER", ""))
+          workers = environ.get("INPUT_WORKERS", "")
+          if not WORKERS.match(workers) or int(workers) > 64:
+              error("workers must be an integer from 0 to 64")
+          check_path("path_prefix", environ.get("INPUT_PATH_PREFIX", ""))
+          check_path("jjb_path", environ.get("INPUT_JJB_PATH", ""))
+          check_repository(environ.get("INPUT_REPOSITORY", ""))
+          check_policy(environ)
+
+          if errors:
+              print(f"Plan failed with {len(errors)} error(s) ❌")
+              sys.exit(1)
+
+          will_deploy = merged == deploy
+          with open(environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"deploy={'true' if will_deploy else 'false'}\n")
+              handle.write(f"ref={deploy}\n")
+              handle.write(f"revision={revision.lower()}\n")
+              handle.write(f"jenkins_endpoint={endpoint}\n")
+          print("Inputs are valid ✅")
+          if will_deploy:
+              print("The change merged to the deploy branch: Update runs ✅")
+          else:
+              print(
+                  "::notice::gerrit_branch is not deploy_branch, so the"
+                  " Update job is skipped and nothing is deployed"
+              )
+          # END ci_management_merge_plan
+          PYEOF
+
+  update:
+    name: 'Update'
+    needs: plan
+    if: needs.plan.outputs.deploy == 'true'
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+          # yamllint disable-line rule:line-length
+          supplemental_config: ${{ inputs.harden_runner_supplemental_allowlist }}
+          # A caller naming a list depends on it, so its absence fails
+          # here rather than at the first blocked connection.
+          # yamllint disable-line rule:line-length
+          supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
+          allow_list_summary: 'true'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          # The Jenkins host comes from jenkins_url, which the plan
+          # validated and reduced to 'host:port'.
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+            ${{ needs.plan.outputs.jenkins_endpoint }}
+
+      # The GitHub mirror replicates from Gerrit after the merge, so
+      # its branch tip may not hold the change yet. Wait for it before
+      # checking anything out, and never deploy a tree without it.
+      - name: 'Wait for the merged revision'
+        id: wait
+        env:
+          DEPLOY_REF: ${{ needs.plan.outputs.ref }}
+          MERGED_REVISION: ${{ needs.plan.outputs.revision }}
+          SERVER_URL: ${{ github.server_url }}
+          REPOSITORY: ${{ inputs.repository || github.repository }}
+          # The token actions/checkout uses below, for a private
+          # repository; it lives only in the scratch repository.
+          AUTH_TOKEN: ${{ github.token }}
+        run: |
+          # Wait for the merged revision
+          set -euo pipefail
+          # tests/test-ci-management-merge-plan.sh extracts the script
+          # between the BEGIN and END markers.
+          # BEGIN ci_management_merge_wait
+          # The plan validated the ref, the revision and the
+          # repository. The wait runs in a scratch bare repository
+          # with no working tree and no submodules, and fetches
+          # commits alone. It outputs the tip that passed, so the
+          # checkout gets exactly that commit, not the branch's
+          # newer tip.
+          # Backoff between fetches; the waits sum to 300 seconds. The
+          # whole step ends within 'limit' seconds of starting: each
+          # wait is cut to what remains, and every git command, local
+          # ones included, runs through 'bounded'. A wait never eats
+          # into the last 'reserve' seconds, so a final fetch and
+          # ancestry check always follow it.
+          delays=(5 10 20 40 60 60 60 45)
+          limit=300
+          reserve=20
+          # Each fetch force-updates this ref, so the next one offers
+          # the commits already fetched and downloads only new ones,
+          # and a rewritten deploy branch replaces the old tip.
+          tracking=refs/remotes/origin/deploy
+          scratch=$(mktemp -d "${RUNNER_TEMP}/merged-revision.XXXXXX")
+          # Bash runs the EXIT trap on 'exit', on an error under 'set
+          # -e' and on HUP, INT or TERM, so the scratch repository and
+          # the token header in its config go on every path.
+          trap 'rm -rf "${scratch}"' EXIT
+          # The command 'bounded' last cut off at the limit, if any.
+          cut=''
+          # Run a command under what is left of the limit. 'timeout'
+          # sends TERM at the limit, then KILL 5 seconds later if the
+          # command ignores the TERM. Even a local git command can
+          # block, on a lock or a lazy fetch in this partial clone,
+          # so every git command runs through here. Call it in this
+          # shell, never inside $(...), so 'cut' survives.
+          bounded() {
+            local left=$((limit - SECONDS)) rc=0
+            cut=''
+            if [ "${left}" -le 0 ]; then
+              cut="$1 $2"
+              return 124
+            fi
+            timeout -k 5 "${left}" "$@" || rc=$?
+            if [ "${rc}" -eq 124 ] || [ "${rc}" -eq 137 ]; then
+              cut="$1 $2"
+            fi
+            return "${rc}"
+          }
+          # A command other than the fetch hit the limit: the wait
+          # cannot tell whether the mirror holds the revision.
+          deadline() {
+            echo "::error::The wait reached its ${limit}s limit at" \
+              "'${cut}', before it could check the deploy branch." \
+              "Nothing was deployed."
+            exit 1
+          }
+          # Set up the scratch repository; a stall there ends at the
+          # limit too.
+          prepare() {
+            bounded "$@" && return 0
+            if [ -n "${cut}" ]; then
+              deadline
+            fi
+            echo "::error::'$1 $2' failed while preparing the wait." \
+              "Nothing was deployed."
+            exit 1
+          }
+          prepare git init --quiet --bare "${scratch}"
+          export GIT_DIR="${scratch}"
+          # A missing revision must read as 'not yet', never trigger
+          # an unbounded lazy fetch of the object. Git must fail
+          # rather than prompt for credentials, and speak English so
+          # its failures can be told apart.
+          export GIT_NO_LAZY_FETCH=1 GIT_TERMINAL_PROMPT=0 LC_ALL=C
+          prepare git config remote.origin.url "${SERVER_URL}/${REPOSITORY}"
+          if [ -n "${AUTH_TOKEN:-}" ]; then
+            basic=$(printf 'x-access-token:%s' "${AUTH_TOKEN}" |
+              base64 -w 0)
+            echo "::add-mask::${basic}"
+            # printf is a builtin, so the header never reaches a
+            # command line.
+            {
+              printf '[http "%s/"]\n' "${SERVER_URL}"
+              printf '\textraheader = AUTHORIZATION: basic %s\n' "${basic}"
+            } >> "${scratch}/config"
+          fi
+          attempt=0
+          fetches=0
+          tip=''
+          not_replicated() {
+            if [ -n "${cut}" ] && [ "${cut}" != 'git fetch' ]; then
+              deadline
+            fi
+            echo "::error::The merged revision is not on the deploy" \
+              "branch after ${fetches} fetches in ${limit}s: the GitHub" \
+              "mirror has not replicated the change from Gerrit." \
+              "Nothing was deployed."
+            exit 1
+          }
+          # Replication lag is the only failure worth waiting out. A
+          # refused fetch or a missing branch will not heal, so it
+          # fails at once with its own cause; anything else, such as
+          # a network error or a fetch cut off at the deadline, means
+          # 'not yet'.
+          refused() {
+            case "$1" in
+              *"couldn't find remote ref"*)
+                echo "::error::The mirror of ${REPOSITORY} has no" \
+                  "${DEPLOY_REF}: check deploy_branch. Nothing was" \
+                  "deployed."
+                exit 1
+                ;;
+              *"Authentication failed"* | *"could not read Username"* | \
+                *"could not read Password"* | *"returned error: 401"* | \
+                *"returned error: 403"* | *"Repository not found"* | \
+                *"repository '"*"' not found"* | \
+                *"does not appear to be a git repository"*)
+                echo "::error::Fetching ${REPOSITORY} was refused: check" \
+                  "the repository input and the job token's access to" \
+                  "it. Nothing was deployed."
+                exit 1
+                ;;
+            esac
+          }
+          # Fetch the deploy branch and test it. A revision not present
+          # at all also means 'not yet'. Output goes through files in
+          # the scratch repository, so 'bounded' runs in this shell.
+          replicated() {
+            local rc=0 err
+            if [ "$((limit - SECONDS))" -le 0 ]; then
+              return 1
+            fi
+            fetches=$((fetches + 1))
+            bounded git fetch --quiet --no-tags --filter=tree:0 origin \
+              "+${DEPLOY_REF}:${tracking}" > "${scratch}/fetch.log" 2>&1 ||
+              rc=$?
+            if [ "${rc}" -ne 0 ]; then
+              err=$(< "${scratch}/fetch.log")
+              printf '%s\n' "${err}"
+              refused "${err}"
+              echo "Fetch ${fetches} failed or timed out (exit ${rc})"
+              return 1
+            fi
+            bounded git rev-parse --verify --quiet \
+              "${tracking}^{commit}" > "${scratch}/tip" || return 1
+            tip=$(< "${scratch}/tip")
+            bounded git merge-base --is-ancestor "${MERGED_REVISION}" \
+              "${tip}" 2> /dev/null
+          }
+          until replicated; do
+            left=$((limit - SECONDS))
+            if [ "${attempt}" -ge "${#delays[@]}" ] ||
+              [ "${left}" -le "${reserve}" ]; then
+              not_replicated
+            fi
+            delay=${delays[attempt]}
+            if [ "${delay}" -gt "$((left - reserve))" ]; then
+              delay=$((left - reserve))
+            fi
+            attempt=$((attempt + 1))
+            echo "${MERGED_REVISION} is not on the deploy branch yet;" \
+              "fetching again in ${delay}s (${attempt}/${#delays[@]})"
+            sleep "${delay}"
+          done
+          echo "sha=${tip}" >> "${GITHUB_OUTPUT}"
+          echo "The deploy branch tip ${tip} holds ${MERGED_REVISION} ✅"
+          # END ci_management_merge_wait
+
+      # One checkout, of the exact commit the wait verified. No git
+      # command follows it: actions/checkout owns a clean tree, the
+      # submodules and their URL rewriting.
+      - name: 'Checkout verified commit'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ steps.wait.outputs.sha }}
+          submodules: true
+          persist-credentials: false
+
+      - name: 'Update Jenkins jobs'
+        id: jjb
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/jjb-action@a5ab34f387cd6a1b346a52b47077901a0df0a682  # v0.0.1
+        with:
+          mode: update
+          path_prefix: ${{ inputs.path_prefix }}
+          jjb_path: ${{ inputs.jjb_path }}
+          jenkins_url: ${{ inputs.jenkins_url }}
+          jenkins_user: ${{ inputs.jenkins_user }}
+          jenkins_password: ${{ secrets.jenkins_password }}
+          delete_old: ${{ inputs.delete_old }}
+          workers: ${{ inputs.workers }}
+
+      - name: 'Report job count'
+        env:
+          JOB_COUNT: ${{ steps.jjb.outputs.job_count }}
+        run: |
+          # Report job count
+          echo "JJB updated ${JOB_COUNT} job(s) in Jenkins ✅"
+          echo "Jenkins Job Builder updated ${JOB_COUNT} job(s)." \
+            >> "${GITHUB_STEP_SUMMARY}"
