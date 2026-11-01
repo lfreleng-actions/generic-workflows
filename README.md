@@ -461,6 +461,40 @@ first. Copy a caller from
 legacy workflow, including its dropped inline and URL pre-build
 scripts.
 
+## CI management verify reusable workflow
+
+[`.github/workflows/ci-management-verify.yaml`](.github/workflows/ci-management-verify.yaml)
+verifies a change to a ci-management repository against a Gerrit
+change or a GitHub commit. A `Lint` job runs every hook in the
+change's pre-commit configuration, and a `JJB` job checks the change
+out with its `global-jjb` submodule and generates the Jenkins jobs
+with Jenkins Job Builder in test mode. Both run the change's own
+content, so each removes the Gerrit checkout's persisted token, from
+every submodule too, before anything else runs. The workflow replaces
+the three ci-management verify workflows in
+`lfit/releng-reusable-workflows`.
+
+```yaml
+jobs:
+  ci-management-verify:
+    name: 'CI Management Verify'
+    permissions:
+      contents: read
+    # Pin a real generic-workflows release SHA in place of <SHA>.
+    uses: lfreleng-actions/generic-workflows/.github/workflows/ci-management-verify.yaml@<SHA>
+    with:
+      gerrit_refspec: ${{ inputs.GERRIT_REFSPEC }}
+      gerrit_project: ${{ inputs.GERRIT_PROJECT }}
+      gerrit_branch: ${{ inputs.GERRIT_BRANCH }}
+```
+
+As with tox verify, the reusable casts no vote, and the Gerrit example
+caller checks that the voting account can read the change first. Copy
+the caller from
+[`examples/ci-management/`](examples/ci-management/), and see
+[`docs/ci-management-verify.md`](docs/ci-management-verify.md) for the
+inputs, the credential handling, and the migration of each consumer.
+
 ## Caller filenames
 
 A consuming repository names its callers after the reusable it calls:
@@ -469,17 +503,20 @@ A consuming repository names its callers after the reusable it calls:
 repository carry an `-action` suffix (`release-action.yaml`,
 `semantic-pull-request-action.yaml`, `linting-action.yaml`,
 `clear-action-cache-action.yaml`, `autolabeler-action.yaml`,
-`change-isolation-action.yaml`, `tox-verify-action.yaml`) because a
-caller here cannot share a filename with the reusable it calls. Do not
-copy that suffix into a consuming repository. Gerrit verify callers,
-such as the change isolation and tox verify examples, follow
+`change-isolation-action.yaml`, `tox-verify-action.yaml`,
+`ci-management-verify-action.yaml`) because a caller here cannot share
+a filename with the reusable it calls. Do not copy that suffix into a
+consuming repository. Gerrit verify callers, such as the change
+isolation, tox verify and ci-management verify examples, follow
 gerrit_to_platform's naming instead: the filename must contain both
-`gerrit` and `verify`.
+`gerrit` and `verify`, and must not contain `required`, which
+gerrit_to_platform keeps for an organisation's required workflows.
 
 ## Gerrit support
 
 Gerrit-mirrored projects use these workflows unchanged. Apart from
-change isolation and tox verify, none of the reusables here takes
+change isolation, tox verify and ci-management verify, none of the
+reusables here takes
 Gerrit *checkout* inputs, and none performs a dual checkout. The
 release reusable keeps `require_gerrit`, which verifies a tag's
 signing key against a Gerrit account and has nothing to do with
@@ -506,9 +543,10 @@ read. The autolabeler is out for the same reason, having no pull
 request to label. The linting reusable takes no Gerrit checkout
 inputs; a Gerrit project calls it from a `push` trigger on the mirror.
 
-Change isolation and tox verify are the exceptions, because they run
-per patchset: gerrit_to_platform dispatches their callers for each
-change, and each reusable checks that change out with
+Change isolation, tox verify and ci-management verify are the
+exceptions, because they run per patchset: gerrit_to_platform
+dispatches their callers for each change, and each reusable checks
+that change out with
 `checkout-gerrit-change-action` whenever the caller passes
 `gerrit_refspec`, and falls back to a normal checkout otherwise.
 
@@ -521,8 +559,10 @@ the semantic pull request reusable workflow, and
 [`docs/linting.md`](docs/linting.md) for the linting reusable
 workflow, [`docs/autolabeler.md`](docs/autolabeler.md) for the
 autolabeler, [`docs/change-isolation.md`](docs/change-isolation.md)
-for change isolation, and [`docs/tox-verify.md`](docs/tox-verify.md)
-for tox verify.
+for change isolation, [`docs/tox-verify.md`](docs/tox-verify.md)
+for tox verify, and
+[`docs/ci-management-verify.md`](docs/ci-management-verify.md) for
+ci-management verify.
 
 [pre-commit.ci results page]: https://results.pre-commit.ci/latest/github/lfreleng-actions/generic-workflows/main
 [pre-commit.ci status badge]: https://results.pre-commit.ci/badge/github/lfreleng-actions/generic-workflows/main.svg
