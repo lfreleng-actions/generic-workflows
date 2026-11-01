@@ -58,6 +58,7 @@ rules:
       - gerrit-tox-verify.yaml:211
       - github-tox-verify.yaml:45
       - gerrit-ci-management-verify.yaml:223
+      - gerrit-ci-management-merge.yaml:221
 
   stale-action-refs:
     ignore:
@@ -87,6 +88,7 @@ rules:
       - gerrit-tox-verify.yaml:211
       - github-tox-verify.yaml:45
       - gerrit-ci-management-verify.yaml:223
+      - gerrit-ci-management-merge.yaml:221
 
   secrets-outside-env:
     ignore:
@@ -119,3 +121,9 @@ rules:
       - gerrit-ci-management-verify.yaml:174
       - gerrit-ci-management-verify.yaml:206
       - gerrit-ci-management-verify.yaml:267
+      # The Gerrit ci-management merge example hands the commenting
+      # account's key to the same two actions, for the same reason:
+      # gerrit_to_platform dispatches it on every merge.
+      - gerrit-ci-management-merge.yaml:170
+      - gerrit-ci-management-merge.yaml:203
+      - gerrit-ci-management-merge.yaml:267

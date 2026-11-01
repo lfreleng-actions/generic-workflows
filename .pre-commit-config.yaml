@@ -283,3 +283,17 @@ repos:
         pass_filenames: false
         # yamllint disable-line rule:line-length
         files: '^(\.github/workflows/(ci-management-verify|tox-verify|change-isolation)\.yaml|tests/test-ci-management-verify-plan\.sh)$'
+
+  # Fixtures for the ci-management merge plan and merged-revision
+  # wait. The test extracts both from the workflow, so it runs
+  # whenever the workflow or the fixtures change. 'language: system'
+  # with an explicit bash, as for the verify fixtures above.
+  - repo: local
+    hooks:
+      - id: ci-management-merge-fixtures
+        name: CI management merge plan fixtures
+        entry: bash tests/test-ci-management-merge-plan.sh
+        language: system
+        pass_filenames: false
+        # yamllint disable-line rule:line-length
+        files: '^(\.github/workflows/ci-management-merge\.yaml|tests/test-ci-management-merge-plan\.sh)$'
