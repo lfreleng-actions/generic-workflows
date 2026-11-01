@@ -1,0 +1,13 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# The one project in the fixture, as a ci-management repository
+# defines its own jobs.
+
+- project:
+    name: ci-management
+    project-name: ci-management
+    build-node: ubuntu-docker
+    jobs:
+      - '{project-name}-fixture-verify'

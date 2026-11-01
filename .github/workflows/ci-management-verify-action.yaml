@@ -1,0 +1,63 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# =============================================================================
+# Thin ci-management verify caller (self-test)
+# =============================================================================
+# This repository consumes its own reusable ci-management verify
+# workflow, so every pull request raised here runs the wiring shipped
+# to consumers: plan -> Lint and JJB, each in block mode behind the
+# organisation allow-list, against the fixture in
+# tests/fixtures/ci-management/, shaped like a consumer's tree.
+#
+# What the run covers, and what it cannot:
+#   * JJB generates the fixture's one project from its one job
+#     template, in jjb/. A consumer links its global-jjb submodule
+#     into that tree as jjb/global-jjb -> ../global-jjb/jjb. A link
+#     must be committed for the reusable's JJB leg to see it, and this
+#     repository cannot commit one, so JJB does not read the fixture's
+#     sibling global-jjb/. jjb-action's own suite covers the linked
+#     layout; see docs/ci-management-verify.md.
+#   * Lint runs the fixture's .pre-commit-config.yaml with
+#     standalone-linting-action. prek runs a configuration's hooks
+#     from the git top level, so check-yaml reads every YAML file in
+#     this repository and actionlint every workflow here, not the
+#     fixture alone. Both pass here, and the run shows the actionlint
+#     hook consumers add works within the organisation allow-list.
+#   * A pull request cannot dispatch Gerrit mode, so the Gerrit
+#     checkout, a submodule fetched through it, and the credential
+#     removal are covered offline by
+#     tests/test-ci-management-verify-plan.sh instead.
+#
+# The reusable is referenced with the self-repository form ('$/'),
+# which resolves this repository at the commit already running, so the
+# branch's own copy runs. Consumers pin a released SHA instead, as
+# examples/ci-management/ shows.
+#
+# The '-action' suffix is a local disambiguator: a caller in this
+# repository cannot share a file name with the reusable it calls.
+# =============================================================================
+name: 'CI Management Verify (self) 🏗️'
+
+# yamllint disable-line rule:truthy
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions: {}
+
+concurrency:
+  group: 'ci-management-verify-self-${{ github.ref }}'
+  cancel-in-progress: true
+
+jobs:
+  ci-management-verify:
+    name: 'CI Management Verify (self)'
+    permissions:
+      contents: read
+    uses: $/.github/workflows/ci-management-verify.yaml
+    with:
+      path_prefix: 'tests/fixtures/ci-management'
+      jjb_path: 'jjb'
+      harden_runner_egress: 'block'

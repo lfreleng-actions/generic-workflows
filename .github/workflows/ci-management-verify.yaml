@@ -1,0 +1,694 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Reusable ci-management verify workflow.
+#
+#   [gerrit] -> plan -> Lint
+#                    -> JJB
+#
+# 'gerrit' runs in Gerrit mode alone (gerrit_refspec set): it checks
+# the Gerrit inputs and resolves the ref the legs check the change out
+# against, with the same script as the 'gerrit' job in
+# change-isolation.yaml. 'plan' validates the inputs; it checks
+# nothing out. 'Lint' runs every hook in the change's own pre-commit
+# configuration through lfreleng-actions/standalone-linting-action.
+# 'JJB' checks the change out with its submodules, global-jjb among
+# them, and generates the Jenkins jobs through
+# lfreleng-actions/jjb-action in test mode.
+#
+# Replaces gerrit-ci-management-verify.yaml,
+# gerrit-compose-ci-management-verify.yaml and
+# composed-ci-management-verify.yaml in lfit/releng-reusable-workflows.
+# See docs/ci-management-verify.md.
+#
+# Security posture:
+#   * The reusable casts no vote and holds no Gerrit SSH key; voting
+#     stays in the caller.
+#   * All variable data reaches 'run' blocks through 'env', never
+#     through expression interpolation.
+#   * Both legs run the change's own code: the hooks it configures and
+#     the JJB tree it carries. Neither receives a token: the GitHub
+#     checkout persists none, the Gerrit checkout's token is removed,
+#     from every submodule too, before anything else runs, and the
+#     lint leg passes no github_token.
+#   * In Gerrit mode the lint leg neither restores nor saves the
+#     hooks' cache: the run is dispatched on the default branch, and
+#     trusted runs there would restore what the change saved.
+#   * Fails closed: an unsafe path fails the plan, and with it both
+#     legs.
+#
+# Egress: every job starts with step-security/harden-runner, in block
+# mode unless harden_runner_egress is 'audit'.
+#   * 'gerrit' and 'plan' talk to GitHub alone, so they allow
+#     'github.com:443' and nothing else, as change-isolation.yaml
+#     does.
+#   * The legs fetch hook environments, Python and JJB's packages, and
+#     global-jjb from its Gerrit server. They load the shared
+#     organisation allow-list through harden-runner-block-action, plus
+#     any supplemental list the caller names, as tox-verify.yaml does.
+name: '[R] CI Management Verify 🏗️'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_call:
+    inputs:
+      path_prefix:
+        description: >-
+          Root of the ci-management tree, relative to the repository
+          root: the lint leg reads .pre-commit-config.yaml there, and
+          JJB runs from it.
+        required: false
+        type: string
+        default: '.'
+      jjb_path:
+        description: 'JJB tree, relative to path_prefix'
+        required: false
+        type: string
+        default: 'jjb'
+
+      # --- Checkout target (defaults to the calling repository) ---
+      repository:
+        description: 'Repository to check out (owner/name); empty = caller'
+        required: false
+        type: string
+        default: ''
+      ref:
+        description: >-
+          Branch, tag or SHA to check out when no Gerrit refspec is
+          set; empty checks out the commit that triggered the run.
+        required: false
+        type: string
+        default: ''
+
+      # --- Gerrit-aware checkout (empty unless dispatched via Gerrit) ---
+      gerrit_refspec:
+        description: 'Gerrit refspec of the change under test'
+        required: false
+        type: string
+        default: ''
+      gerrit_project:
+        description: 'Gerrit project name'
+        required: false
+        type: string
+        default: ''
+      gerrit_branch:
+        description: >-
+          Gerrit branch the change targets: a short name ('master') or
+          a full ref ('refs/meta/config')
+        required: false
+        type: string
+        default: ''
+      gerrit_url:
+        description: 'Gerrit server URL (falls back to the GERRIT_URL variable)'
+        required: false
+        type: string
+        default: ''
+
+      # --- Runner selection and timeout ---
+      runs_on:
+        description: >-
+          Runner label for all jobs. Must name a Linux runner that
+          harden-runner can monitor; GitHub-hosted Ubuntu runners
+          qualify.
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+      timeout_minutes:
+        description: 'Timeout (minutes) for each of the Lint and JJB jobs'
+        required: false
+        type: number
+        default: 30
+
+      # --- Runner hardening ---
+      harden_runner_egress:
+        description: "Harden-runner egress policy: 'block' or 'audit'"
+        required: false
+        type: string
+        default: 'block'
+      harden_runner_allowlist:
+        description: >-
+          Out-of-band harden-runner allow-list configuration for the
+          Lint and JJB jobs
+        required: false
+        type: string
+        # yamllint disable-line rule:line-length
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
+      harden_runner_supplemental_allowlist:
+        description: >-
+          Extra harden-runner allow-list merged with
+          harden_runner_allowlist, in the same coordinate grammar
+        required: false
+        type: string
+        default: ''
+
+    secrets:
+      token:
+        description: >-
+          Token used to check out 'repository'; defaults to the job's
+          GITHUB_TOKEN. Supply one with read access when the target
+          is private, since GITHUB_TOKEN reaches the caller alone.
+        required: false
+
+permissions: {}
+
+# No concurrency block, deliberately: concurrency belongs to the
+# caller, which knows the change it runs for. See
+# examples/ci-management/ for the recommended group.
+
+jobs:
+  gerrit:
+    name: 'Gerrit endpoint'
+    # GitHub mode needs no Gerrit ref, so it spends no runner here;
+    # 'plan' accepts the skipped result.
+    if: inputs.gerrit_refspec != ''
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      ref: ${{ steps.endpoint.outputs.ref }}
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          disable-telemetry: ${{ inputs.harden_runner_egress != 'audit' }}
+          allowed-endpoints: >
+            github.com:443
+
+      # Fails Gerrit mode before any job checks anything out. The
+      # script is change-isolation.yaml's, byte for byte;
+      # tests/test-ci-management-verify-plan.sh fails when the two drift.
+      - name: 'Resolve Gerrit endpoint'
+        id: endpoint
+        env:
+          GERRIT_PROJECT: ${{ inputs.gerrit_project }}
+          GERRIT_BRANCH: ${{ inputs.gerrit_branch }}
+          # yamllint disable-line rule:line-length
+          GERRIT_URL: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+        run: |
+          # Resolve Gerrit endpoint
+          set -euo pipefail
+          # tests/test-ci-management-verify-plan.sh extracts the script between
+          # the BEGIN and END markers. '-I' as in the plan.
+          python3 -I - <<'PYEOF'
+          # BEGIN ci_management_verify_gerrit
+          import os
+          import re
+          import sys
+          from urllib.parse import urlsplit
+
+          LABEL = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\Z")
+          REQUIRED = (
+              ("gerrit_project", "GERRIT_PROJECT"),
+              ("gerrit_branch", "GERRIT_BRANCH"),
+              ("gerrit_url/GERRIT_URL", "GERRIT_URL"),
+          )
+
+
+          def fail(message):
+              print(f"::error::{message}")
+              sys.exit(1)
+
+
+          def checkout_ref(branch):
+              # gerrit_to_platform passes a short name for a branch
+              # ('master') but the full ref for a change against any
+              # other ref ('refs/meta/config'). The value reaches
+              # 'git fetch' and never an annotation.
+              # C0, DEL and C1, as in has_control(); checked before
+              # isspace(), which covers U+0085 but not U+009B.
+              if any(
+                  ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F
+                  for char in branch
+              ):
+                  fail("gerrit_branch contains a control character")
+              if any(char.isspace() for char in branch):
+                  fail("gerrit_branch contains whitespace")
+              if (
+                  ".." in branch
+                  or "//" in branch
+                  or branch.startswith("-")
+                  or branch.endswith(("/", ".lock"))
+              ):
+                  fail(
+                      "gerrit_branch is not a valid ref name: it contains"
+                      " '..' or '//', starts with '-', or ends with '/'"
+                      " or '.lock'"
+                  )
+              if branch.startswith("refs/"):
+                  return branch
+              return f"refs/heads/{branch}"
+
+
+          def endpoint(url):
+              # The URL never reaches an annotation: it may hold
+              # characters that would end or forge one.
+              if any(ord(char) <= 0x20 or ord(char) >= 0x7F for char in url):
+                  fail(
+                      "The Gerrit URL contains whitespace, a control"
+                      " character or a non-ASCII character"
+                  )
+              parts = urlsplit(url)
+              if parts.scheme != "https":
+                  fail("The Gerrit URL must start with https://")
+              if parts.query or parts.fragment or url.endswith(("?", "#")):
+                  fail("The Gerrit URL must carry no query or fragment")
+              netloc = parts.netloc
+              if "@" in netloc:
+                  fail("The Gerrit URL must carry no user information")
+              host, colon, port = netloc.partition(":")
+              if colon:
+                  if not port.isdigit() or not 0 < int(port) < 65536:
+                      fail("The Gerrit URL names an invalid port")
+                  port = str(int(port))
+              else:
+                  port = "443"
+              host = host.lower()
+              labels = host.split(".")
+              if len(host) > 253 or not all(
+                  LABEL.match(label) for label in labels
+              ):
+                  fail("The Gerrit URL names an invalid hostname")
+              return f"{host}:{port}"
+
+
+          missing = [
+              name for name, variable in REQUIRED
+              if not os.environ.get(variable, "")
+          ]
+          if missing:
+              fail(f"gerrit_refspec is set but missing: {' '.join(missing)}")
+          result = endpoint(os.environ["GERRIT_URL"])
+          ref = checkout_ref(os.environ["GERRIT_BRANCH"])
+          output = os.environ["GITHUB_OUTPUT"]
+          with open(output, "a", encoding="utf-8") as handle:
+              handle.write(f"endpoint={result}\n")
+              handle.write(f"ref={ref}\n")
+          print(f"Gerrit endpoint: {result} ✅")
+          print(f"Gerrit ref: {ref} ✅")
+          # END ci_management_verify_gerrit
+          PYEOF
+
+
+  plan:
+    name: 'Plan'
+    needs: gerrit
+    # A job that needs a skipped one is skipped too unless its 'if'
+    # says otherwise. 'gerrit' may be skipped only in GitHub mode.
+    # yamllint disable-line rule:line-length
+    if: ${{ !cancelled() && (needs.gerrit.result == 'success' || (inputs.gerrit_refspec == '' && needs.gerrit.result == 'skipped')) }}
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 5
+    # No checkout: the plan validates inputs alone.
+    permissions: {}
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          disable-telemetry: ${{ inputs.harden_runner_egress != 'audit' }}
+          allowed-endpoints: >
+            github.com:443
+
+      - name: 'Validate inputs'
+        env:
+          INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
+          INPUT_JJB_PATH: ${{ inputs.jjb_path }}
+          INPUT_HARDEN_RUNNER_EGRESS: ${{ inputs.harden_runner_egress }}
+          INPUT_HARDEN_RUNNER_ALLOWLIST: ${{ inputs.harden_runner_allowlist }}
+          # yamllint disable-line rule:line-length
+          INPUT_HARDEN_RUNNER_SUPPLEMENTAL_ALLOWLIST: ${{ inputs.harden_runner_supplemental_allowlist }}
+        run: |
+          # Validate inputs
+          set -euo pipefail
+          # tests/test-ci-management-verify-plan.sh extracts the
+          # script between the BEGIN and END markers. '-I' keeps the
+          # working directory off sys.path.
+          python3 -I - <<'PYEOF'
+          # BEGIN ci_management_verify_plan
+          import os
+          import sys
+
+          errors = []
+
+
+          def error(message):
+              # Messages never carry an input value: one could end or
+              # forge a workflow command.
+              errors.append(message)
+              print(f"::error::{message}")
+
+
+          def has_control(text):
+              return any(
+                  ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F
+                  for char in text
+              )
+
+
+          def check_path(name, value):
+              # Both paths reach jjb-action, and path_prefix also
+              # standalone-linting-action, which change into them or
+              # hand them to a command line. An absolute path or a
+              # '..' segment could leave the checkout, and a leading
+              # '-' would read as an option.
+              if not value:
+                  error(f"{name} is empty")
+              # C0, DEL and C1, checked before isspace(), which covers
+              # U+0085 but not U+009B.
+              elif has_control(value):
+                  error(f"{name} contains a control character")
+              elif any(char.isspace() for char in value):
+                  error(f"{name} contains whitespace")
+              elif value.startswith("/"):
+                  error(f"{name} must be a relative path")
+              elif value.startswith("-"):
+                  error(f"{name} starts with '-'")
+              elif ".." in value.split("/"):
+                  error(f"{name} contains a '..' segment")
+
+
+          def check_policy(environ):
+              egress = environ.get("INPUT_HARDEN_RUNNER_EGRESS", "")
+              if egress not in ("block", "audit"):
+                  error("harden_runner_egress must be 'block' or 'audit'")
+              # harden-runner-block-action merges a supplemental list
+              # into the baseline, so it rejects one with no baseline.
+              if environ.get(
+                  "INPUT_HARDEN_RUNNER_SUPPLEMENTAL_ALLOWLIST", ""
+              ) and not environ.get("INPUT_HARDEN_RUNNER_ALLOWLIST", ""):
+                  error(
+                      "harden_runner_supplemental_allowlist is set but"
+                      " harden_runner_allowlist is empty; a supplemental"
+                      " list extends the baseline"
+                  )
+
+
+          check_path("path_prefix", os.environ.get("INPUT_PATH_PREFIX", ""))
+          check_path("jjb_path", os.environ.get("INPUT_JJB_PATH", ""))
+          check_policy(os.environ)
+
+          if errors:
+              print(f"Plan failed with {len(errors)} error(s) ❌")
+              sys.exit(1)
+          print("Inputs are valid ✅")
+          # END ci_management_verify_plan
+          PYEOF
+
+  lint:
+    name: 'Lint'
+    needs: [gerrit, plan]
+    # The default 'if' skips a job when any job earlier in its chain
+    # was skipped, and 'gerrit' is skipped in GitHub mode, so this job
+    # tests the plan's own result instead.
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+          # yamllint disable-line rule:line-length
+          supplemental_config: ${{ inputs.harden_runner_supplemental_allowlist }}
+          # A caller naming a list depends on it, so its absence fails
+          # here rather than at the first blocked connection.
+          # yamllint disable-line rule:line-length
+          supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
+          # The list is the same in both legs; summarise it here alone.
+          allow_list_summary: 'true'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Checkout Gerrit change'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        with:
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          # The action defaults this to github.repository, which inside
+          # a reusable workflow names the caller rather than the
+          # project under review.
+          repository: ${{ inputs.repository || github.repository }}
+          # A short branch name or a full ref, resolved by 'gerrit'.
+          ref: ${{ needs.gerrit.outputs.ref }}
+          token: ${{ secrets.token || github.token }}
+      # The Gerrit action checks out with persist-credentials: true and
+      # offers no way to turn it off, so the token stays readable until
+      # the post-job cleanup. The hooks are the change's own code, so
+      # the token goes before they start.
+      - name: 'Remove checkout credentials'
+        if: inputs.gerrit_refspec != ''
+        shell: bash
+        run: |
+          # Remove checkout credentials
+          set -euo pipefail
+          # tests/test-ci-management-verify-plan.sh extracts the
+          # script between the BEGIN and END markers, and fails when
+          # it drifts from the other leg's or tox-verify.yaml's.
+          # BEGIN ci_management_verify_drop_credentials_lint
+          # actions/checkout writes the token to a
+          # git-credentials-*.config file, pulled into a repository's
+          # configuration by includeIf entries: .git/config and, with
+          # submodules, each submodule's config under .git/modules.
+          # Older releases set an extraheader in those files
+          # themselves. Remove both forms from every repository, and
+          # never print a value: it is the token.
+          top=$(git rev-parse --absolute-git-dir)
+          git_dirs=("${top}")
+          if [ -d "${top}/modules" ]; then
+            # A submodule's name may hold '/', so its git directory
+            # can sit at any depth, with nested submodules below it.
+            # Keep each directory holding a config file that git
+            # accepts as a repository.
+            while IFS= read -r -d '' config; do
+              dir=${config%/config}
+              if git --git-dir="${dir}" rev-parse --git-dir \
+                > /dev/null 2>&1; then
+                git_dirs+=("${dir}")
+              fi
+            done < <(find "${top}/modules" -type f -name config -print0)
+          fi
+          for dir in "${git_dirs[@]}"; do
+            while IFS= read -r -d '' entry; do
+              key=${entry%%$'\n'*}
+              value=${entry#*$'\n'}
+              case "${value##*/}" in
+                git-credentials-*.config)
+                  rm -f -- "${value}"
+                  git --git-dir="${dir}" config --local --unset-all \
+                    "${key}" || [ $? -eq 5 ]
+                  ;;
+              esac
+            done < <(git --git-dir="${dir}" config --local -z \
+              --get-regexp '^includeif\..*\.path$' || true)
+            while IFS= read -r -d '' key; do
+              git --git-dir="${dir}" config --local --unset-all \
+                "${key}" || [ $? -eq 5 ]
+            done < <(git --git-dir="${dir}" config --local -z \
+              --name-only --get-regexp '^http\..*\.extraheader$' || true)
+          done
+          # Read each repository's effective configuration, includes
+          # and all, so a form missed above fails the leg instead of
+          # reaching the change's code.
+          for dir in "${git_dirs[@]}"; do
+            if git --git-dir="${dir}" config --get-regexp \
+              '^http\..*\.extraheader$' > /dev/null; then
+              echo "::error::Checkout credentials remain in the git" \
+                "configuration; refusing to run the change's code"
+              exit 1
+            fi
+          done
+          echo "Checkout credentials removed ✅"
+          # END ci_management_verify_drop_credentials_lint
+      - name: 'Checkout repository'
+        if: inputs.gerrit_refspec == ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+          token: ${{ secrets.token || github.token }}
+
+      # The tree is already prepared, so no_checkout keeps the action
+      # from replacing it with the caller's commit. No github_token:
+      # the hooks are the change's own code. In Gerrit mode the run is
+      # dispatched on the default branch, whose cache scope trusted
+      # runs share, so neither prek's hook environments nor uv's
+      # cache are restored or saved: a saved cache would let the
+      # change plant code those runs execute.
+      - name: 'Run linting hooks'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/standalone-linting-action@a00b2febdcb6da5332f77e829dfdc131a91b8fce  # v0.10.1
+        with:
+          no_checkout: 'true'
+          run_all_hooks: 'true'
+          path_prefix: ${{ inputs.path_prefix }}
+          cache_hooks: ${{ inputs.gerrit_refspec != '' && 'false' || 'true' }}
+
+  jjb:
+    name: 'JJB'
+    needs: [gerrit, plan]
+    # The default 'if' skips a job when any job earlier in its chain
+    # was skipped, and 'gerrit' is skipped in GitHub mode, so this job
+    # tests the plan's own result instead.
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+          # yamllint disable-line rule:line-length
+          supplemental_config: ${{ inputs.harden_runner_supplemental_allowlist }}
+          # A caller naming a list depends on it, so its absence fails
+          # here rather than at the first blocked connection.
+          # yamllint disable-line rule:line-length
+          supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Checkout Gerrit change'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        with:
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          # The action defaults this to github.repository, which inside
+          # a reusable workflow names the caller rather than the
+          # project under review.
+          repository: ${{ inputs.repository || github.repository }}
+          # A short branch name or a full ref, resolved by 'gerrit'.
+          ref: ${{ needs.gerrit.outputs.ref }}
+          token: ${{ secrets.token || github.token }}
+          submodules: 'true'
+      # As in the Lint leg: the token goes before the change's JJB tree
+      # is read. With submodules, actions/checkout v7.0.1 points every
+      # submodule's config at the same credentials file, so the
+      # removal covers each submodule as well as the superproject.
+      - name: 'Remove checkout credentials'
+        if: inputs.gerrit_refspec != ''
+        shell: bash
+        run: |
+          # Remove checkout credentials
+          set -euo pipefail
+          # tests/test-ci-management-verify-plan.sh extracts the
+          # script between the BEGIN and END markers, and fails when
+          # it drifts from the other leg's or tox-verify.yaml's.
+          # BEGIN ci_management_verify_drop_credentials_jjb
+          # actions/checkout writes the token to a
+          # git-credentials-*.config file, pulled into a repository's
+          # configuration by includeIf entries: .git/config and, with
+          # submodules, each submodule's config under .git/modules.
+          # Older releases set an extraheader in those files
+          # themselves. Remove both forms from every repository, and
+          # never print a value: it is the token.
+          top=$(git rev-parse --absolute-git-dir)
+          git_dirs=("${top}")
+          if [ -d "${top}/modules" ]; then
+            # A submodule's name may hold '/', so its git directory
+            # can sit at any depth, with nested submodules below it.
+            # Keep each directory holding a config file that git
+            # accepts as a repository.
+            while IFS= read -r -d '' config; do
+              dir=${config%/config}
+              if git --git-dir="${dir}" rev-parse --git-dir \
+                > /dev/null 2>&1; then
+                git_dirs+=("${dir}")
+              fi
+            done < <(find "${top}/modules" -type f -name config -print0)
+          fi
+          for dir in "${git_dirs[@]}"; do
+            while IFS= read -r -d '' entry; do
+              key=${entry%%$'\n'*}
+              value=${entry#*$'\n'}
+              case "${value##*/}" in
+                git-credentials-*.config)
+                  rm -f -- "${value}"
+                  git --git-dir="${dir}" config --local --unset-all \
+                    "${key}" || [ $? -eq 5 ]
+                  ;;
+              esac
+            done < <(git --git-dir="${dir}" config --local -z \
+              --get-regexp '^includeif\..*\.path$' || true)
+            while IFS= read -r -d '' key; do
+              git --git-dir="${dir}" config --local --unset-all \
+                "${key}" || [ $? -eq 5 ]
+            done < <(git --git-dir="${dir}" config --local -z \
+              --name-only --get-regexp '^http\..*\.extraheader$' || true)
+          done
+          # Read each repository's effective configuration, includes
+          # and all, so a form missed above fails the leg instead of
+          # reaching the change's code.
+          for dir in "${git_dirs[@]}"; do
+            if git --git-dir="${dir}" config --get-regexp \
+              '^http\..*\.extraheader$' > /dev/null; then
+              echo "::error::Checkout credentials remain in the git" \
+                "configuration; refusing to run the change's code"
+              exit 1
+            fi
+          done
+          echo "Checkout credentials removed ✅"
+          # END ci_management_verify_drop_credentials_jjb
+      - name: 'Checkout repository'
+        if: inputs.gerrit_refspec == ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+          submodules: true
+          token: ${{ secrets.token || github.token }}
+
+      - name: 'Test Jenkins jobs'
+        id: jjb
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/jjb-action@a5ab34f387cd6a1b346a52b47077901a0df0a682  # v0.0.1
+        with:
+          mode: test
+          path_prefix: ${{ inputs.path_prefix }}
+          jjb_path: ${{ inputs.jjb_path }}
+
+      - name: 'Report job count'
+        env:
+          JOB_COUNT: ${{ steps.jjb.outputs.job_count }}
+        run: |
+          # Report job count
+          echo "JJB generated ${JOB_COUNT} job(s) ✅"
+          echo "Jenkins Job Builder generated ${JOB_COUNT} job(s)." \
+            >> "${GITHUB_STEP_SUMMARY}"

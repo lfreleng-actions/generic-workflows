@@ -1,0 +1,21 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Fixture for .github/workflows/ci-management-verify-action.yaml: the
+# Lint leg runs every hook here. check-yaml stands in for a
+# ci-management repository's own hooks, and actionlint is the hook
+# docs/ci-management-verify.md asks every consumer to add, pinned as
+# this repository's .pre-commit-config.yaml pins it, so the self-test
+# shows it runs within the organisation allow-list.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # frozen: v6.0.0
+    hooks:
+      - id: check-yaml
+
+  - repo: https://github.com/Mateusz-Grzelinski/actionlint-py
+    rev: 357f7eec6dec49bf7693dc0dbec30212226d5492  # frozen: v1.7.12.25
+    hooks:
+      - id: actionlint

@@ -593,36 +593,62 @@ jobs:
           # Remove checkout credentials
           set -euo pipefail
           # tests/test-tox-verify-plan.sh extracts the script between
-          # the BEGIN and END markers.
+          # the BEGIN and END markers, and
+          # tests/test-ci-management-verify-plan.sh fails when it
+          # drifts from that workflow's copies.
           # BEGIN tox_verify_drop_credentials
           # actions/checkout writes the token to a
-          # git-credentials-*.config file, pulled into .git/config by
-          # includeIf entries; older releases set an extraheader in
-          # .git/config itself. Remove both forms, and never print a
-          # value: it is the token.
-          while IFS= read -r -d '' entry; do
-            key=${entry%%$'\n'*}
-            value=${entry#*$'\n'}
-            case "${value##*/}" in
-              git-credentials-*.config)
-                rm -f -- "${value}"
-                git config --local --unset-all "${key}" || [ $? -eq 5 ]
-                ;;
-            esac
-          done < <(git config --local -z --get-regexp \
-            '^includeif\..*\.path$' || true)
-          while IFS= read -r -d '' key; do
-            git config --local --unset-all "${key}" || [ $? -eq 5 ]
-          done < <(git config --local -z --name-only --get-regexp \
-            '^http\..*\.extraheader$' || true)
-          # Read the effective configuration, includes and all, so a
-          # form missed above fails the leg instead of reaching tox.
-          if git config --get-regexp '^http\..*\.extraheader$' \
-            > /dev/null; then
-            echo "::error::Checkout credentials remain in the git" \
-              "configuration; refusing to run the change's code"
-            exit 1
+          # git-credentials-*.config file, pulled into a repository's
+          # configuration by includeIf entries: .git/config and, with
+          # submodules, each submodule's config under .git/modules.
+          # Older releases set an extraheader in those files
+          # themselves. Remove both forms from every repository, and
+          # never print a value: it is the token.
+          top=$(git rev-parse --absolute-git-dir)
+          git_dirs=("${top}")
+          if [ -d "${top}/modules" ]; then
+            # A submodule's name may hold '/', so its git directory
+            # can sit at any depth, with nested submodules below it.
+            # Keep each directory holding a config file that git
+            # accepts as a repository.
+            while IFS= read -r -d '' config; do
+              dir=${config%/config}
+              if git --git-dir="${dir}" rev-parse --git-dir \
+                > /dev/null 2>&1; then
+                git_dirs+=("${dir}")
+              fi
+            done < <(find "${top}/modules" -type f -name config -print0)
           fi
+          for dir in "${git_dirs[@]}"; do
+            while IFS= read -r -d '' entry; do
+              key=${entry%%$'\n'*}
+              value=${entry#*$'\n'}
+              case "${value##*/}" in
+                git-credentials-*.config)
+                  rm -f -- "${value}"
+                  git --git-dir="${dir}" config --local --unset-all \
+                    "${key}" || [ $? -eq 5 ]
+                  ;;
+              esac
+            done < <(git --git-dir="${dir}" config --local -z \
+              --get-regexp '^includeif\..*\.path$' || true)
+            while IFS= read -r -d '' key; do
+              git --git-dir="${dir}" config --local --unset-all \
+                "${key}" || [ $? -eq 5 ]
+            done < <(git --git-dir="${dir}" config --local -z \
+              --name-only --get-regexp '^http\..*\.extraheader$' || true)
+          done
+          # Read each repository's effective configuration, includes
+          # and all, so a form missed above fails the leg instead of
+          # reaching the change's code.
+          for dir in "${git_dirs[@]}"; do
+            if git --git-dir="${dir}" config --get-regexp \
+              '^http\..*\.extraheader$' > /dev/null; then
+              echo "::error::Checkout credentials remain in the git" \
+                "configuration; refusing to run the change's code"
+              exit 1
+            fi
+          done
           echo "Checkout credentials removed ✅"
           # END tox_verify_drop_credentials
       - name: 'Checkout repository'
