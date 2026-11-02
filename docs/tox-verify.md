@@ -60,6 +60,12 @@ recommended group.
 | `harden_runner_egress`                 | `block`                   | `block` or `audit`                                                                    |
 | `harden_runner_allowlist`              | organisation list, pinned | Allow-list for the tox jobs, in `harden-runner-block-action` coordinate grammar       |
 | `harden_runner_supplemental_allowlist` | empty                     | Extra allow-list merged with the baseline, for project-specific hosts                 |
+| `harden_runner_supplemental_unpinned`  | `false`                   | Follow the supplemental list at its default branch; same organisation alone           |
+| `harden_runner_extra_endpoints`        | empty                     | Inline `host:port` endpoints added to the allow-list; a short-term fix                |
+
+The `harden_runner_*` inputs are common to every reusable workflow
+here; [Egress allow-list](../README.md#egress-allow-list) describes
+them once, with examples.
 
 | Secret  | Purpose                                                                                               |
 | ------- | ----------------------------------------------------------------------------------------------------- |
