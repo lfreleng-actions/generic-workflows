@@ -388,13 +388,12 @@ on:
         default: 15
 
       # --- Runner hardening ---
+      # Defaults to 'audit': hook environments legitimately download
+      # from hook-specific hosts the organisation allow-list may not
+      # carry. Callers with a known hook set should pass 'block',
+      # adding any hosts their hooks need to that list.
       harden_runner_egress:
-        description: >-
-          Harden-runner egress policy: 'audit' or 'block'. Defaults
-          to 'audit' because hook environments legitimately download
-          from hook-specific hosts the organisation allow-list may not
-          carry. Callers with a known hook set should pass 'block',
-          adding any hosts their hooks need to that list.
+        description: "Harden-runner egress policy: 'block' or 'audit'"
         required: false
         type: string
         default: 'audit'
@@ -404,6 +403,30 @@ on:
         type: string
         # yamllint disable-line rule:line-length
         default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@084d6861688632b2edb6bde3c180145bebf9cc7a'  # v0.17.2
+      harden_runner_supplemental_allowlist:
+        description: >-
+          Extra harden-runner allow-list merged with
+          harden_runner_allowlist, in the same coordinate grammar.
+          Empty adds nothing
+        required: false
+        type: string
+        default: ''
+      harden_runner_supplemental_unpinned:
+        description: >-
+          Let harden_runner_supplemental_allowlist omit '@ref' and
+          follow its default branch; only a list in the caller's own
+          organisation qualifies
+        required: false
+        type: boolean
+        default: false
+      harden_runner_extra_endpoints:
+        description: >-
+          Extra egress endpoints written inline, host[:port] tokens
+          separated by spaces or newlines, merged into the allow-list
+          for short-lived fixes. Empty adds nothing
+        required: false
+        type: string
+        default: ''
 
     outputs:
       # 'true'/'false' from a fixed vocabulary; safe to use in a
@@ -449,12 +472,24 @@ jobs:
         # DNS outage must not fail the job. A step 'if:' cannot skip
         # the loader: its 'pre' entry has no 'pre-if', so the pre
         # phase runs regardless. continue-on-error covers that phase
-        # too, and under 'block' a failure still stops the job.
-        continue-on-error: ${{ inputs.harden_runner_egress != 'block' }}
+        # too, and under 'block' a failure still stops the job. A
+        # caller naming a supplemental list depends on it, so its
+        # failure stops the job under 'audit' as well.
+        # yamllint disable-line rule:line-length
+        continue-on-error: ${{ inputs.harden_runner_egress != 'block' && inputs.harden_runner_supplemental_allowlist == '' }}
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
         with:
           config: ${{ inputs.harden_runner_allowlist }}
+          # yamllint disable-line rule:line-length
+          supplemental_config: ${{ inputs.harden_runner_supplemental_allowlist }}
+          # A caller naming a list depends on it, so its absence fails
+          # here rather than at the first blocked connection.
+          # yamllint disable-line rule:line-length
+          supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
+          # yamllint disable-line rule:line-length
+          supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}
+          extra_endpoints: ${{ inputs.harden_runner_extra_endpoints }}
 
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
@@ -3241,12 +3276,23 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - name: 'Load harden-runner allow-list'
-        # Fatal under 'block' alone, as in the plan job.
-        continue-on-error: ${{ inputs.harden_runner_egress != 'block' }}
+        # Fatal under 'block', or when a supplemental list is named,
+        # as in the plan job.
+        # yamllint disable-line rule:line-length
+        continue-on-error: ${{ inputs.harden_runner_egress != 'block' && inputs.harden_runner_supplemental_allowlist == '' }}
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
         with:
           config: ${{ inputs.harden_runner_allowlist }}
+          # yamllint disable-line rule:line-length
+          supplemental_config: ${{ inputs.harden_runner_supplemental_allowlist }}
+          # A caller naming a list depends on it, so its absence fails
+          # here rather than at the first blocked connection.
+          # yamllint disable-line rule:line-length
+          supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
+          # yamllint disable-line rule:line-length
+          supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}
+          extra_endpoints: ${{ inputs.harden_runner_extra_endpoints }}
           # The plan job's summary already shows the list; repeat it
           # on one matrix leg, not every one.
           allow_list_summary: ${{ strategy.job-index == 0 }}

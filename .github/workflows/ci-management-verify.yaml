@@ -126,10 +126,9 @@ on:
         required: false
         type: string
         default: 'block'
+      # Loaded by the Lint and JJB jobs.
       harden_runner_allowlist:
-        description: >-
-          Out-of-band harden-runner allow-list configuration for the
-          Lint and JJB jobs
+        description: 'Out-of-band harden-runner allow-list configuration'
         required: false
         type: string
         # yamllint disable-line rule:line-length
@@ -137,7 +136,24 @@ on:
       harden_runner_supplemental_allowlist:
         description: >-
           Extra harden-runner allow-list merged with
-          harden_runner_allowlist, in the same coordinate grammar
+          harden_runner_allowlist, in the same coordinate grammar.
+          Empty adds nothing
+        required: false
+        type: string
+        default: ''
+      harden_runner_supplemental_unpinned:
+        description: >-
+          Let harden_runner_supplemental_allowlist omit '@ref' and
+          follow its default branch; only a list in the caller's own
+          organisation qualifies
+        required: false
+        type: boolean
+        default: false
+      harden_runner_extra_endpoints:
+        description: >-
+          Extra egress endpoints written inline, host[:port] tokens
+          separated by spaces or newlines, merged into the allow-list
+          for short-lived fixes. Empty adds nothing
         required: false
         type: string
         default: ''
@@ -423,6 +439,9 @@ jobs:
           # here rather than at the first blocked connection.
           # yamllint disable-line rule:line-length
           supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
+          # yamllint disable-line rule:line-length
+          supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}
+          extra_endpoints: ${{ inputs.harden_runner_extra_endpoints }}
           # The list is the same in both legs; summarise it here alone.
           allow_list_summary: 'true'
       - name: 'Harden runner'
@@ -568,6 +587,9 @@ jobs:
           # here rather than at the first blocked connection.
           # yamllint disable-line rule:line-length
           supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
+          # yamllint disable-line rule:line-length
+          supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}
+          extra_endpoints: ${{ inputs.harden_runner_extra_endpoints }}
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
