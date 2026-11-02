@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 #
-# Fixtures for the Gerrit and plan logic in
+# Fixtures for the Gerrit, plan and tox Python logic in
 # .github/workflows/tox-verify.yaml.
 #
 # The plan turns 'tox_envs' into the matrix, and each name reaches
@@ -69,6 +69,9 @@ extract "${isolation}" change_isolation_gerrit "${isolation_gerrit}" \
 credentials_script="${workdir}/drop-credentials.sh"
 extract "${workflow}" tox_verify_drop_credentials "${credentials_script}" \
   'git-credentials-'
+tox_python_script="${workdir}/tox-python.sh"
+extract "${workflow}" tox_verify_tox_python "${tox_python_script}" \
+  'default_base_python'
 
 passed=0
 failed=0
@@ -298,6 +301,8 @@ expect_matrix 'several envs' '["lint", "docs", "py3.12"]' \
   '{"tox_env":["lint","docs","py3.12"]}'
 expect_matrix 'every allowed character' '["Docs-Linkcheck_1.0+x"]' \
   '{"tox_env":["Docs-Linkcheck_1.0+x"]}'
+expect_matrix 'leading _' '["_private"]' '{"tox_env":["_private"]}'
+expect_matrix 'leading digit' '["3.12"]' '{"tox_env":["3.12"]}'
 expect_matrix 'whitespace around the JSON' '  [ "lint" ]
 ' '{"tox_env":["lint"]}'
 expect_matrix '100 characters' "[\"$(printf 'a%.0s' {1..100})\"]" \
@@ -311,6 +316,8 @@ expect_matrix 'parallel all' '["lint"]' '{"tox_env":["lint"]}' \
   INPUT_PARALLEL='all'
 expect_matrix 'parallel 4' '["lint"]' '{"tox_env":["lint"]}' \
   INPUT_PARALLEL='4'
+expect_matrix 'parallel off' '["lint"]' '{"tox_env":["lint"]}' \
+  INPUT_PARALLEL='off'
 expect_matrix 'audit egress' '["lint"]' '{"tox_env":["lint"]}' \
   INPUT_HARDEN_RUNNER_EGRESS='audit'
 expect_matrix 'supplemental list' '["lint"]' '{"tox_env":["lint"]}' \
@@ -351,6 +358,11 @@ expect_plan_error 'no-break space' '["li\u00a0nt"]' 'contains whitespace'
 expect_plan_error 'comma' '["lint,docs"]' 'contains a comma'
 expect_plan_error 'leading -' '["-e"]' "starts with '-'"
 expect_plan_error 'option' '["--version"]' "starts with '-'"
+# tox-run-action rejects these (invalid-tox-envs); the plan must too.
+expect_plan_error 'leading .' '[".hidden"]' \
+  "must start with a letter, a digit or '_'"
+expect_plan_error 'leading +' '["+x"]' \
+  "must start with a letter, a digit or '_'"
 expect_plan_error 'factor braces' '["py{311,312}"]' 'contains a comma'
 expect_plan_error 'brace' '["py{312}"]' 'outside letters'
 expect_plan_error 'glob' '["py*"]' 'outside letters'
@@ -376,6 +388,8 @@ expect_plan_error 'parallel zero' '["lint"]' 'parallel must be' \
   INPUT_PARALLEL='0'
 expect_plan_error 'parallel extra option' '["lint"]' 'parallel must be' \
   INPUT_PARALLEL='auto -e x'
+expect_plan_error 'parallel OFF' '["lint"]' 'parallel must be' \
+  INPUT_PARALLEL='OFF'
 expect_plan_error 'egress typo' '["lint"]' 'harden_runner_egress must' \
   INPUT_HARDEN_RUNNER_EGRESS='blocked'
 expect_plan_error 'supplemental without baseline' '["lint"]' \
@@ -390,6 +404,74 @@ expect_plan_error 'path_prefix traversal' '["lint"]' \
   'path_prefix must be' INPUT_PATH_PREFIX='docs/../..'
 expect_plan_error 'path_prefix space' '["lint"]' 'path_prefix must be' \
   INPUT_PATH_PREFIX='my docs'
+
+# --- tox Python -----------------------------------------------------
+
+# tox-run-action v1 runs tox on the last Python it sets up, which must
+# be 3.11 or newer. An older requested Python gets TOX_RUNNER_PYTHON
+# listed after it and a default_base_python override back to it; any
+# other value leaves both outputs empty.
+
+# run_tox_python <setup-python version>: sets tp_rc, tp_log,
+# tp_versions, tp_override and tp_summary.
+run_tox_python() {
+  local out="${workdir}/tox-python-output-${RANDOM}"
+  local summary="${workdir}/tox-python-summary-${RANDOM}"
+  : > "${out}"
+  : > "${summary}"
+  tp_rc=0
+  tp_log=$(env -i PATH="${PATH}" REQUESTED_PYTHON="$1" \
+    TOX_RUNNER_PYTHON='3.13' GITHUB_OUTPUT="${out}" \
+    GITHUB_STEP_SUMMARY="${summary}" \
+    bash -euo pipefail "${tox_python_script}" 2>&1) || tp_rc=$?
+  tp_versions=$(read_output "${out}" python_versions) ||
+    tp_versions='<missing>'
+  tp_override=$(sed -n 's/^tox_override=//p' "${out}")
+  tp_summary=$(cat "${summary}")
+}
+
+# expect_tox_python <label> <version> <python_versions> <tox_override>
+expect_tox_python() {
+  run_tox_python "$2"
+  if [ "${tp_rc}" -ne 0 ]; then
+    fail "$1: exit ${tp_rc}, expected 0" "${tp_log}"
+  elif [ "${tp_versions}" != "$3" ]; then
+    fail "$1: python_versions '${tp_versions}', expected '$3'" "${tp_log}"
+  elif [ "${tp_override}" != "$4" ]; then
+    fail "$1: tox_override '${tp_override}', expected '$4'" "${tp_log}"
+  elif [ -n "$3" ] && ! grep -qF '::warning' <<< "${tp_log}"; then
+    fail "$1: no warning for an older Python" "${tp_log}"
+  elif [ -n "$3" ] && ! grep -qF 'end of life' <<< "${tp_summary}"; then
+    fail "$1: no job summary for an older Python" "${tp_summary}"
+  elif [ -z "$3" ] && grep -qF '::warning' <<< "${tp_log}"; then
+    fail "$1: unexpected warning" "${tp_log}"
+  elif [ -z "$3" ] && [ -n "${tp_summary}" ]; then
+    fail "$1: unexpected job summary" "${tp_summary}"
+  else
+    pass
+  fi
+}
+
+expect_tox_python 'Python 3.12' '3.12.13' '' ''
+expect_tox_python 'Python 3.11' '3.11.0' '' ''
+expect_tox_python 'Python 3.13 major.minor' '3.13' '' ''
+expect_tox_python 'Python 4.0' '4.0.1' '' ''
+expect_tox_python 'Python 3.10' '3.10.19' \
+  "$(printf '3.10.19\n3.13')" 'testenv.default_base_python=python3.10'
+expect_tox_python 'Python 3.8' '3.8.18' \
+  "$(printf '3.8.18\n3.13')" 'testenv.default_base_python=python3.8'
+expect_tox_python 'Python 3.9 major.minor' '3.9' \
+  "$(printf '3.9\n3.13')" 'testenv.default_base_python=python3.9'
+expect_tox_python 'Python 2.7' '2.7.18' \
+  "$(printf '2.7.18\n3.13')" 'testenv.default_base_python=python2.7'
+expect_tox_python 'leading zero minor' '3.09.1' \
+  "$(printf '3.09.1\n3.13')" 'testenv.default_base_python=python3.9'
+# Not a plain CPython version: tox-run-action decides, as before.
+expect_tox_python 'no Python set up' '' '' ''
+expect_tox_python 'PyPy' 'pypy3.9.19' '' ''
+expect_tox_python 'pre-release' '3.10.0-rc.1' '' ''
+expect_tox_python 'free-threaded' '3.10t' '' ''
+expect_tox_python 'workflow command' "$(printf '3.10\n::error::x')" '' ''
 
 # --- Checkout credentials -------------------------------------------
 

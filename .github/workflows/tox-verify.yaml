@@ -13,7 +13,9 @@
 # change-isolation.yaml. 'plan' validates the inputs and turns
 # 'tox_envs' into the matrix; it checks nothing out. Each 'Tox: <env>'
 # leg checks the change out and runs one tox environment through
-# lfreleng-actions/tox-run-action.
+# lfreleng-actions/tox-run-action, which runs tox on Python 3.11 or
+# newer; a leg asked for an older Python keeps it for the
+# environments and adds a newer one for tox.
 #
 # Replaces gerrit-compose-required-tox-verify.yaml in
 # lfit/releng-reusable-workflows. See docs/tox-verify.md.
@@ -57,8 +59,9 @@ on:
         default: '.'
       python_version:
         description: >-
-          Python version for tox; ignored when python_version_file is
-          set.
+          Python version for the tox environments; ignored when
+          python_version_file is set. tox itself runs on Python 3.11
+          or newer, so an older version gets a second Python for tox.
         required: false
         type: string
         default: '3.12'
@@ -73,7 +76,7 @@ on:
       parallel:
         description: >-
           tox '--parallel' value: 'auto', 'all' or a positive number;
-          empty runs without '--parallel'.
+          'off' or empty runs without '--parallel'.
         required: false
         type: string
         default: 'auto'
@@ -127,8 +130,7 @@ on:
       runs_on:
         description: >-
           Runner label for all jobs. Must name a Linux runner that
-          harden-runner can monitor, with pipx installed, which
-          tox-run-action needs; GitHub-hosted Ubuntu runners have it.
+          harden-runner can monitor and actions/setup-python serves.
         required: false
         type: string
         default: 'ubuntu-latest'
@@ -377,13 +379,19 @@ jobs:
           MAX_ENVS = 256
           MAX_ENV_LENGTH = 100
           # Each name reaches tox-run-action's 'tox-envs' input, which
-          # the action splits on whitespace into 'tox -e <name>'. A
+          # the action hands to 'tox -e <name>'. It accepts names that
+          # start with a letter, a digit or '_', and rejects the run
+          # otherwise (invalid-tox-envs); the plan applies the same
+          # rule so a bad name fails here, with a clear message. A
           # comma would make one leg run several environments, and a
           # leading '-' would read as an option.
           ENV_NAME = re.compile(r"[A-Za-z0-9._+-]+\Z")
+          ENV_START = re.compile(r"[A-Za-z0-9_]")
           PATH_PREFIX = re.compile(r"[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*\Z")
-          # tox-run-action passes 'parallel' unquoted to '--parallel'.
-          PARALLEL = re.compile(r"(auto|all|[1-9][0-9]{0,3})?\Z")
+          # tox-run-action passes 'parallel' to '--parallel' and
+          # rejects anything else (invalid-parallel); 'off', like an
+          # empty value, omits the flag.
+          PARALLEL = re.compile(r"(auto|all|off|[1-9][0-9]{0,3})?\Z")
           errors = []
 
 
@@ -429,6 +437,11 @@ jobs:
                   error(
                       f"{where} contains a character outside letters,"
                       " digits, '.', '_', '+' and '-'"
+                  )
+                  return False
+              if not ENV_START.match(name):
+                  error(
+                      f"{where} must start with a letter, a digit or '_'"
                   )
                   return False
               return True
@@ -487,8 +500,8 @@ jobs:
           def check_policy(environ):
               if not PARALLEL.match(environ.get("INPUT_PARALLEL", "")):
                   error(
-                      "parallel must be 'auto', 'all', a positive number"
-                      " or empty"
+                      "parallel must be 'auto', 'all', 'off', a positive"
+                      " number or empty"
                   )
               egress = environ.get("INPUT_HARDEN_RUNNER_EGRESS", "")
               if egress not in ("block", "audit"):
@@ -680,18 +693,101 @@ jobs:
           persist-credentials: false
           token: ${{ secrets.token || github.token }}
 
+      # tox-run-action v1 runs tox on the last Python it sets up and
+      # fails unless that is 3.11 or newer. The caller's Python is not
+      # known until setup-python reads python_version_file, so set it
+      # up here first and read the version it reports.
+      - name: 'Set up the requested Python'
+        id: setup-python
+        # yamllint disable-line rule:line-length
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          # As for 'Run tox' below: a file overrides the default.
+          # yamllint disable-line rule:line-length
+          python-version: ${{ inputs.python_version_file == '' && inputs.python_version || '' }}
+          python-version-file: ${{ inputs.python_version_file }}
+
+      # A Python older than 3.11 gets TOX_RUNNER_PYTHON as well, listed
+      # last so it runs tox, and tox_override points tox's
+      # default_base_python back at the requested Python, so an
+      # environment without a Python factor still runs on it. Factor
+      # environments ('py310') and an explicit base_python find their
+      # interpreter on PATH unaided. Any other version, or one that
+      # does not parse, leaves both outputs empty and the action runs
+      # as it always has.
+      - name: 'Select the tox Python'
+        id: tox-python
+        shell: bash
+        env:
+          REQUESTED_PYTHON: ${{ steps.setup-python.outputs.python-version }}
+          TOX_RUNNER_PYTHON: '3.13'
+        run: |
+          # Select the tox Python
+          set -euo pipefail
+          # tests/test-tox-verify-plan.sh extracts the script between
+          # the BEGIN and END markers.
+          # BEGIN tox_verify_tox_python
+          versions=''
+          override=''
+          # The version comes from setup-python, which may report a
+          # PyPy or pre-release form; only a plain CPython version can
+          # be compared, and only that reaches an annotation.
+          if [[ "${REQUESTED_PYTHON}" =~ ^([0-9]+)\.([0-9]+)(\.[0-9]+)?$ ]]
+          then
+            major=$((10#${BASH_REMATCH[1]}))
+            minor=$((10#${BASH_REMATCH[2]}))
+            if (( major < 3 || (major == 3 && minor < 11) )); then
+              versions="${REQUESTED_PYTHON}"$'\n'"${TOX_RUNNER_PYTHON}"
+              override="testenv.default_base_python=python${major}.${minor}"
+              message="tox runs on Python ${TOX_RUNNER_PYTHON}, as"
+              message="${message} tox-run-action requires; the tox"
+              message="${message} environments still run on the"
+              message="${message} requested Python ${major}.${minor}."
+              message="${message} Python ${major}.${minor} has reached"
+              message="${message} end of life; move to a supported Python."
+              echo "::warning title=Python older than tox supports::${message}"
+              if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+                {
+                  echo '### Tox Python'
+                  echo
+                  echo "${message}"
+                } >> "${GITHUB_STEP_SUMMARY}"
+              fi
+            fi
+          fi
+          # A random delimiter keeps the multi-line value from closing
+          # the block early.
+          delimiter="PYTHON_VERSIONS_$(openssl rand -hex 16)"
+          {
+            echo "python_versions<<${delimiter}"
+            printf '%s\n' "${versions}"
+            echo "${delimiter}"
+            echo "tox_override=${override}"
+          } >> "${GITHUB_OUTPUT}"
+          if [ -n "${versions}" ]; then
+            printf 'Python versions for tox-run-action:\n%s\n' "${versions}"
+          else
+            echo 'No separate tox Python needed ✅'
+          fi
+          # END tox_verify_tox_python
+
       - name: 'Run tox'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/tox-run-action@2820cd45d9bc61216e8cddb84158c55c7781d321  # v0.2.0
+        uses: lfreleng-actions/tox-run-action@1d68abdba823c3b723395507fcf780e9dc91c193  # v1.0.0
+        env:
+          # Empty unless 'Select the tox Python' added a tox Python.
+          TOX_OVERRIDE: ${{ steps.tox-python.outputs.tox_override }}
         with:
           path_prefix: ${{ inputs.path_prefix }}
           # tox-run-action hands both to actions/setup-python, which
           # uses python-version and ignores the file when both are
           # set. Sending the version only without a file lets the file
-          # override the '3.12' default.
+          # override the '3.12' default. With a tox Python added, the
+          # list carries the requested version, so the file goes.
           # yamllint disable-line rule:line-length
-          python-version: ${{ inputs.python_version_file == '' && inputs.python_version || '' }}
-          python-version-file: ${{ inputs.python_version_file }}
+          python-version: ${{ steps.tox-python.outputs.python_versions != '' && steps.tox-python.outputs.python_versions || (inputs.python_version_file == '' && inputs.python_version || '') }}
+          # yamllint disable-line rule:line-length
+          python-version-file: ${{ steps.tox-python.outputs.python_versions == '' && inputs.python_version_file || '' }}
           tox-envs: ${{ matrix.tox_env }}
           parallel: ${{ inputs.parallel }}
           pre-build-script: ${{ inputs.pre_build_script }}

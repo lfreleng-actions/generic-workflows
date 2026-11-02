@@ -47,6 +47,10 @@ jobs:
       tox_envs: '["lint", "py312"]'
       # Optional; the defaults are shown.
       # path_prefix: '.'
+      # tox runs on Python 3.11 or newer. An older python_version
+      # still runs the environments on that Python, with 3.13 added
+      # for tox and a warning; 3.8 and 3.9 need runs_on: ubuntu-24.04.
       # python_version: '3.12'
+      # 'auto', 'all', 'off', a number, or empty.
       # parallel: 'auto'
       # pre_build_script: 'scripts/pre-build.sh'
