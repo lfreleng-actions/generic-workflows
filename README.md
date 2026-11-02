@@ -446,8 +446,13 @@ workflows.
 [`.github/workflows/tox-verify.yaml`](.github/workflows/tox-verify.yaml)
 runs a project's tox environments, one `Tox: <env>` job each, against
 a Gerrit change or a GitHub commit. A plan job validates `tox_envs`
-first and fails on an empty, duplicate or unsafe entry. Each tox job
-runs in block mode behind the organisation egress allow-list. The
+first and fails on an empty, duplicate or unsafe entry, or one
+`tox-run-action` would reject, as it does a `parallel` value other
+than `auto`, `all`, `off`, a number or empty. tox runs on Python 3.11
+or newer; a `python_version` older than that still sets up the
+requested Python for the environments, with a newer one added for tox
+and a warning. Each tox job runs in block mode behind the
+organisation egress allow-list. The
 workflow replaces `gerrit-compose-required-tox-verify.yaml` in
 `lfit/releng-reusable-workflows`.
 
@@ -471,9 +476,9 @@ example caller checks that the voting account can read the change
 first. Copy a caller from
 [`examples/tox-verify/`](examples/tox-verify/), and see
 [`docs/tox-verify.md`](docs/tox-verify.md) for the inputs, the
-`tox_envs` rules, the egress allow-lists, and the migration from the
-legacy workflow, including its dropped inline and URL pre-build
-scripts.
+`tox_envs` rules, the Python handling, the egress allow-lists, and
+the migration from the legacy workflow, including its dropped inline
+and URL pre-build scripts.
 
 ## CI management verify reusable workflow
 

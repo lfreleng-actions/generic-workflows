@@ -11,6 +11,17 @@
 # behind the organisation allow-list, against the fixture in
 # tests/fixtures/tox/.
 #
+# tox-run-action runs tox on Python 3.11 or newer. The 'tox-verify'
+# job asks for 3.12, which runs tox itself; the 'tox-verify-py310*'
+# jobs ask for 3.10, once by python_version and once by
+# python_version_file, so the workflow must add a newer Python for
+# tox and keep the environments on 3.10. Each fixture environment
+# fails unless it ran where its leg expects (see
+# tests/fixtures/tox-python/record_python.py), so a passing leg proves
+# which interpreters ran. The 3.10 legs run on ubuntu-24.04:
+# actions/setup-python builds no 3.8 or 3.9 for Ubuntu 26.04, and
+# these legs stand in for callers that still ask for one.
+#
 # A pull request cannot dispatch Gerrit mode, so the Gerrit checkout
 # (a full ref such as refs/meta/config included) and the plan's
 # rejection paths are covered offline by tests/test-tox-verify-plan.sh
@@ -46,6 +57,7 @@ jobs:
     with:
       tox_envs: '["fixture", "python"]'
       path_prefix: 'tests/fixtures/tox'
+      python_version: '3.12'
       harden_runner_egress: 'block'
       # Exercise the allow-list inputs without granting anything new.
       # A same-organisation list may follow its default branch, and
@@ -57,3 +69,28 @@ jobs:
       harden_runner_supplemental_allowlist: 'lfreleng-actions//'
       harden_runner_supplemental_unpinned: true
       harden_runner_extra_endpoints: 'github.com:443'
+
+  tox-verify-py310:
+    name: 'Tox Verify (self, Python 3.10)'
+    permissions:
+      contents: read
+    uses: $/.github/workflows/tox-verify.yaml
+    with:
+      tox_envs: '["fixture", "py310"]'
+      path_prefix: 'tests/fixtures/tox-python/py310'
+      python_version: '3.10'
+      runs_on: 'ubuntu-24.04'
+      harden_runner_egress: 'block'
+
+  tox-verify-py310-file:
+    name: 'Tox Verify (self, Python 3.10 file)'
+    permissions:
+      contents: read
+    uses: $/.github/workflows/tox-verify.yaml
+    with:
+      tox_envs: '["fixture", "py310"]'
+      path_prefix: 'tests/fixtures/tox-python/py310'
+      # Relative to the repository root, not to path_prefix.
+      python_version_file: 'tests/fixtures/tox-python/py310/python-version.txt'
+      runs_on: 'ubuntu-24.04'
+      harden_runner_egress: 'block'

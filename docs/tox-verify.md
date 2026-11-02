@@ -34,6 +34,8 @@ environments.
   `fail-fast: false`, so every environment reports. Each leg hardens
   the runner, checks the change out, drops any persisted token and
   runs `lfreleng-actions/tox-run-action` for its one environment.
+  tox itself runs on Python 3.11 or newer; see
+  [Python version](#python-version).
 
 The workflow has no `concurrency` block: concurrency belongs to the
 caller, which knows the change it runs for. The examples carry the
@@ -45,9 +47,9 @@ recommended group.
 | -------------------------------------- | ------------------------- | ------------------------------------------------------------------------------------- |
 | `tox_envs`                             | (required)                | JSON array of tox environment names; see below                                        |
 | `path_prefix`                          | `.`                       | Directory holding `tox.ini`, relative to the repository root                          |
-| `python_version`                       | `3.12`                    | Python version for tox; `python_version_file` overrides it                            |
+| `python_version`                       | `3.12`                    | Python for the tox environments; `python_version_file` overrides it                   |
 | `python_version_file`                  | empty                     | File holding the Python version, relative to the repository root                      |
-| `parallel`                             | `auto`                    | tox `--parallel` value: `auto`, `all` or a positive number; empty omits `--parallel`  |
+| `parallel`                             | `auto`                    | tox `--parallel` value: `auto`, `all` or a positive number; `off` or empty omits it   |
 | `pre_build_script`                     | empty                     | Repository-relative path of an executable `.sh` script to run before tox              |
 | `repository`                           | caller                    | Repository to check out (`owner/name`)                                                |
 | `ref`                                  | triggering commit         | Branch, tag or SHA to check out in GitHub mode                                        |
@@ -84,18 +86,47 @@ empty whenever `python_version_file` names a file. Name the file
 relative to the repository root, not to `path_prefix`: `setup-python`
 reads it from the workspace.
 
+`tox-run-action` v1 installs tox from its own lock and runs it on the
+last Python it sets up, which must be 3.11 or newer; it fails with
+`error=unsupported-python` otherwise. Each leg first sets up the
+requested Python and reads the version `setup-python` reports:
+
+- **3.11 or newer**, or a version that is not a plain
+  `major.minor[.patch]` (PyPy, a pre-release): the leg calls the
+  action with `python_version` or `python_version_file` as given, and
+  tox runs on that Python.
+- **Older than 3.11**, such as 3.8, 3.9 or 3.10: the leg passes the
+  action a `python-version` list holding the requested version first
+  and Python 3.13 last, so tox runs on 3.13, and sets
+  `TOX_OVERRIDE=testenv.default_base_python=python<major>.<minor>`.
+  An environment without a Python factor (`lint`, `docs`) still runs
+  on the requested Python; a factor environment (`py38`, `py310`) and
+  an explicit `base_python` in `tox.ini` find their interpreter on
+  `PATH`, where both Pythons sit. The leg emits a warning and a job
+  summary line saying so, and that the requested Python has reached
+  end of life.
+
+Legacy callers that set `PYTHON_VERSION` to an older Python keep
+working this way, but should move to a supported one. A runner image
+must still offer the requested version: `actions/setup-python` has no
+3.8 or 3.9 build for Ubuntu 26.04, so such a caller sets
+`runs_on: ubuntu-24.04`.
+
 ### Runner
 
-`runs_on` must name a Linux runner that harden-runner supports, and
-that has `pipx` installed: `tox-run-action` runs tox through
-`pipx run` and fails without it. GitHub-hosted Ubuntu runners have
-`pipx`; a self-hosted runner must provide it.
+`runs_on` must name a Linux runner that harden-runner supports and
+`actions/setup-python` serves. `tox-run-action` installs `uv` and tox
+itself, so the runner needs no `pipx`.
 
 ## `tox_envs`
 
 A JSON array of strings, one matrix leg each. Each value reaches
-`tox-run-action`'s `tox-envs` input, which the action splits on
-whitespace into `tox -e <value>`. The `plan` job rejects the run, and
+`tox-run-action`'s `tox-envs` input, which the action hands to
+`tox -e <value>`. The action rejects a value that is not
+comma-separated names starting with a letter, a digit or `_`
+(`invalid-tox-envs`), and the plan applies the same rule to each entry
+first, so a bad name fails the plan with a clear message rather than
+every leg. The `plan` job rejects the run, and
 names the problem without echoing the value, when `tox_envs`:
 
 - is not valid JSON, or not an array;
@@ -105,18 +136,22 @@ names the problem without echoing the value, when `tox_envs`:
 - holds an entry with whitespace, a control character (C0, DEL, or C1
   from U+0080 to U+009F), a comma, or a leading `-`;
 - holds an entry with any character outside letters, digits, `.`, `_`,
-  `+` and `-`.
+  `+` and `-`;
+- holds an entry that starts with `.` or `+`.
 
 A comma would make one leg run more than one environment, and a leading
 `-` would read as a tox option. Generative factors such as
 `py{311,312}` need a comma, so the plan rejects them: list each
 environment instead.
 
-The plan also rejects a `parallel` value other than `auto`, `all`, a
-positive number or empty; a `path_prefix` that is absolute, holds a
-`..` segment or a character outside letters, digits, `.`, `_` and `-`;
-a `harden_runner_egress` other than `block` or `audit`; and a
-supplemental allow-list without a baseline.
+The plan also rejects a `parallel` value other than `auto`, `all`,
+`off`, a positive number or empty, matching the action's
+`invalid-parallel` rule (`off` and empty both omit `--parallel`); a
+`path_prefix` that is absolute, holds a `..` segment or a character
+outside letters, digits, `.`, `_` and `-`; a `harden_runner_egress`
+other than `block` or `audit`; and a supplemental allow-list without a
+baseline. The action, in turn, fails a leg whose `path_prefix`
+resolves outside the workspace through a symlink.
 
 ## Gerrit checkout
 
@@ -237,9 +272,11 @@ Behaviour that changes on migration:
   the legacy `PARALLEL` was empty unless set. With one environment per
   leg, `--parallel` has nothing to run alongside; pass `parallel: ''`
   to omit the flag.
-- `tox-run-action` moves from v0.1.3 to v0.2.0, which takes the same
-  inputs and requires the pre-build script to sit inside the
-  workspace.
+- `tox-run-action` moves from v0.1.3 to v1.0.0. It requires the
+  pre-build script and `path_prefix` to sit inside the workspace,
+  rejects a `tox_envs` entry starting with `.` or `+`, and runs tox on
+  Python 3.11 or newer. A `PYTHON_VERSION` older than 3.11 still
+  works: see [Python version](#python-version).
 - The concurrency group moves from the reusable into the caller.
 - Every job runs behind harden-runner in block mode; a project that
   reaches a host off the organisation list needs a supplemental list,
@@ -268,15 +305,23 @@ credential-removal scripts from between their `BEGIN`/`END` markers
 and runs them offline: the refs `master`, `release/1.2` and
 `refs/meta/config`, the rejected `gerrit_branch` forms, accepted and
 rejected `tox_envs`, `parallel`, `path_prefix` and hardening inputs,
-and a checkout configured with a persisted token. It also fails when
+and a checkout configured with a persisted token. It also extracts the
+`Select the tox Python` script and checks which Pythons and override
+it chooses for 2.7 to 4.0 and for versions it cannot compare. It also fails when
 the `gerrit` script drifts from `change-isolation.yaml`'s, when a
 `run:` block interpolates an expression, and when a harden-runner pin
 is not v2.22.3. The `tox-verify-fixtures` prek hook runs it whenever
 either workflow or the script changes.
 
 `.github/workflows/tox-verify-action.yaml` calls the workflow on this
-repository's own pull requests, in block mode, against the fixture in
-`tests/fixtures/tox/`. A pull request cannot run Gerrit mode, so no
+repository's own pull requests, in block mode, against the fixtures in
+`tests/fixtures/tox/` and `tests/fixtures/tox-python/`. One caller asks
+for Python 3.12 and asserts that tox and the environment ran on 3.12
+with no override; two ask for 3.10, through `python_version` and
+`python_version_file`, on `ubuntu-24.04`, and assert that a factorless
+environment and a `py310` environment both ran on 3.10 while tox ran on
+3.13. Each environment calls `tests/fixtures/tox-python/record_python.py`,
+which fails unless it ran where the leg expects. A pull request cannot run Gerrit mode, so no
 run here covers a Gerrit checkout, the `refs/meta/config` case
 included, or a real vote; the offline fixtures cover the ref
 resolution.
