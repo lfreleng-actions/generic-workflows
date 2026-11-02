@@ -174,25 +174,32 @@ All inputs are optional.
 
 <!-- markdownlint-disable MD013 -->
 
-| Input                                     | Type      | Default                                                        | Purpose                                                                |
-| ----------------------------------------- | --------- | -------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `types`                                   | `string`  | `Fix Feat Chore Docs Style Refactor Perf Test Revert CI Build` | Newline-separated allowed Conventional Commit types                    |
-| `scopes`                                  | `string`  | `''`                                                           | Newline-separated allowed scopes, as regex patterns; empty permits any |
-| `disallow_scopes`                         | `string`  | `''`                                                           | Newline-separated rejected scopes                                      |
-| `require_scope`                           | `boolean` | `false`                                                        | Require every title to carry a scope                                   |
-| `subject_pattern`                         | `string`  | `''`                                                           | Regex the subject must match                                           |
-| `subject_pattern_error`                   | `string`  | `''`                                                           | Message shown when `subject_pattern` fails                             |
-| `ignore_labels`                           | `string`  | `''`                                                           | Newline-separated labels that skip validation                          |
-| `validate_single_commit`                  | `boolean` | `true`                                                         | Check the commit message on single-commit pull requests                |
-| `validate_single_commit_matches_pr_title` | `boolean` | `true`                                                         | Require the single commit subject to match the title                   |
-| `dependabot_relax`                        | `boolean` | `true`                                                         | Allow the Dependabot version-fragment exception                        |
-| `validate_breaking_marker`                | `boolean` | `false`                                                        | Fail when a commit declares a breaking change the title does not       |
-| `runs_on`                                 | `string`  | `ubuntu-latest`                                                | Runner label; must be Linux                                            |
-| `timeout_minutes`                         | `number`  | `5`                                                            | Job timeout                                                            |
-| `harden_runner_egress`                    | `string`  | `block`                                                        | `block` or `audit`                                                     |
-| `harden_runner_allowlist`                 | `string`  | central org list                                               | Out-of-band harden-runner allow-list configuration                     |
+| Input                                     | Type      | Default                                                        | Purpose                                                                     |
+| ----------------------------------------- | --------- | -------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `types`                                   | `string`  | `Fix Feat Chore Docs Style Refactor Perf Test Revert CI Build` | Newline-separated allowed Conventional Commit types                         |
+| `scopes`                                  | `string`  | `''`                                                           | Newline-separated allowed scopes, as regex patterns; empty permits any      |
+| `disallow_scopes`                         | `string`  | `''`                                                           | Newline-separated rejected scopes                                           |
+| `require_scope`                           | `boolean` | `false`                                                        | Require every title to carry a scope                                        |
+| `subject_pattern`                         | `string`  | `''`                                                           | Regex the subject must match                                                |
+| `subject_pattern_error`                   | `string`  | `''`                                                           | Message shown when `subject_pattern` fails                                  |
+| `ignore_labels`                           | `string`  | `''`                                                           | Newline-separated labels that skip validation                               |
+| `validate_single_commit`                  | `boolean` | `true`                                                         | Check the commit message on single-commit pull requests                     |
+| `validate_single_commit_matches_pr_title` | `boolean` | `true`                                                         | Require the single commit subject to match the title                        |
+| `dependabot_relax`                        | `boolean` | `true`                                                         | Allow the Dependabot version-fragment exception                             |
+| `validate_breaking_marker`                | `boolean` | `false`                                                        | Fail when a commit declares a breaking change the title does not            |
+| `runs_on`                                 | `string`  | `ubuntu-latest`                                                | Runner label; must be Linux                                                 |
+| `timeout_minutes`                         | `number`  | `5`                                                            | Job timeout                                                                 |
+| `harden_runner_egress`                    | `string`  | `block`                                                        | `block` or `audit`                                                          |
+| `harden_runner_allowlist`                 | `string`  | central org list                                               | Out-of-band harden-runner allow-list configuration                          |
+| `harden_runner_supplemental_allowlist`    | `string`  | `''`                                                           | Extra allow-list merged with the baseline, for project-specific hosts       |
+| `harden_runner_supplemental_unpinned`     | `boolean` | `false`                                                        | Follow the supplemental list at its default branch; same organisation alone |
+| `harden_runner_extra_endpoints`           | `string`  | `''`                                                           | Inline `host:port` endpoints added to the allow-list; a short-term fix      |
 
 <!-- markdownlint-enable MD013 -->
+
+The `harden_runner_*` inputs are common to every reusable workflow
+here; [Egress allow-list](../README.md#egress-allow-list) describes
+them once, with examples.
 
 `runs_on` must name a Linux runner. Harden-runner enforces an egress
 policy on Linux; elsewhere it degrades to a warning and the job would

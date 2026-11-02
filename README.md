@@ -269,13 +269,21 @@ filters as a `workflow_dispatch` form and delegates to it.
 
 <!-- markdownlint-disable MD013 -->
 
-| Input         | Type      | Default | Effect                                                                          |
-| ------------- | --------- | ------- | ------------------------------------------------------------------------------- |
-| `key_pattern` | `string`  | `''`    | Substring filter applied to cache keys; empty targets every entry               |
-| `ref_filter`  | `string`  | `''`    | Limit deletion to one git ref, such as `refs/heads/main`; empty ignores the ref |
-| `dry_run`     | `boolean` | `false` | List the matching entries and delete nothing                                    |
+| Input                                  | Type      | Default           | Effect                                                                          |
+| -------------------------------------- | --------- | ----------------- | ------------------------------------------------------------------------------- |
+| `key_pattern`                          | `string`  | `''`              | Substring filter applied to cache keys; empty targets every entry               |
+| `ref_filter`                           | `string`  | `''`              | Limit deletion to one git ref, such as `refs/heads/main`; empty ignores the ref |
+| `dry_run`                              | `boolean` | `false`           | List the matching entries and delete nothing                                    |
+| `harden_runner_egress`                 | `string`  | `block`           | Egress policy: `block` or `audit`                                               |
+| `harden_runner_allowlist`              | `string`  | `.github` v0.19.0 | Out-of-band allow-list coordinate                                               |
+| `harden_runner_supplemental_allowlist` | `string`  | `''`              | Extra allow-list merged with the baseline, for project-specific hosts           |
+| `harden_runner_supplemental_unpinned`  | `boolean` | `false`           | Follow the supplemental list at its default branch; same organisation alone     |
+| `harden_runner_extra_endpoints`        | `string`  | `''`              | Inline `host:port` endpoints added to the allow-list; a short-term fix          |
 
 <!-- markdownlint-enable MD013 -->
+
+The `harden_runner_*` inputs are common to every reusable workflow
+here; [Egress allow-list](#egress-allow-list) describes them.
 
 Deleting nothing succeeds: an empty filter set targets every cache, and a
 filter matching no entry exits cleanly.
@@ -330,15 +338,21 @@ configuration carries its own `semver-increment`.
 
 <!-- markdownlint-disable MD013 -->
 
-| Input                     | Type     | Default               | Effect                                              |
-| ------------------------- | -------- | --------------------- | --------------------------------------------------- |
-| `config_name`             | `string` | `release-drafter.yml` | Config file resolved under `.github/`               |
-| `runs_on`                 | `string` | `ubuntu-latest`       | Runner label; Linux, because harden-runner needs it |
-| `timeout_minutes`         | `number` | `3`                   | Job timeout                                         |
-| `harden_runner_egress`    | `string` | `block`               | Egress policy: `block` or `audit`                   |
-| `harden_runner_allowlist` | `string` | `.github` v0.17.1     | Out-of-band allow-list coordinate                   |
+| Input                                  | Type      | Default               | Effect                                                                      |
+| -------------------------------------- | --------- | --------------------- | --------------------------------------------------------------------------- |
+| `config_name`                          | `string`  | `release-drafter.yml` | Config file resolved under `.github/`                                       |
+| `runs_on`                              | `string`  | `ubuntu-latest`       | Runner label; Linux, because harden-runner needs it                         |
+| `timeout_minutes`                      | `number`  | `3`                   | Job timeout                                                                 |
+| `harden_runner_egress`                 | `string`  | `block`               | Egress policy: `block` or `audit`                                           |
+| `harden_runner_allowlist`              | `string`  | `.github` v0.17.1     | Out-of-band allow-list coordinate                                           |
+| `harden_runner_supplemental_allowlist` | `string`  | `''`                  | Extra allow-list merged with the baseline, for project-specific hosts       |
+| `harden_runner_supplemental_unpinned`  | `boolean` | `false`               | Follow the supplemental list at its default branch; same organisation alone |
+| `harden_runner_extra_endpoints`        | `string`  | `''`                  | Inline `host:port` endpoints added to the allow-list; a short-term fix      |
 
 <!-- markdownlint-enable MD013 -->
+
+The `harden_runner_*` inputs are common to every reusable workflow
+here; [Egress allow-list](#egress-allow-list) describes them.
 
 A caller must trigger on **both** `pull_request` and
 `pull_request_target`, the detail callers get wrong more than any
@@ -536,6 +550,120 @@ Copy the caller from
 [`docs/ci-management-merge.md`](docs/ci-management-merge.md) for the
 inputs, the deploy-branch rule, the ancestry check, and the migration
 of each consumer.
+
+## Egress allow-list
+
+Every reusable workflow here that loads its egress allow-list through
+[`harden-runner-block-action`](https://github.com/lfreleng-actions/harden-runner-block-action)
+takes the same five inputs, and passes them to every block-action step
+it runs: `autolabeler.yaml`, `ci-management-merge.yaml`,
+`ci-management-verify.yaml`, `clear-action-cache.yaml`, `linting.yaml`,
+`release.yaml`, `semantic-pull-request.yaml` and `tox-verify.yaml`.
+Each workflow's own reference lists them and links here. Jobs that
+talk to GitHub alone, such as the `gerrit` and `plan` jobs, use a
+fixed `github.com:443` list instead and take none of them.
+
+<!-- markdownlint-disable MD013 -->
+
+| Input                                  | Type      | Default                             | Passed to block-action as                                    |
+| -------------------------------------- | --------- | ----------------------------------- | ------------------------------------------------------------ |
+| `harden_runner_egress`                 | `string`  | `block` (`audit` in `linting.yaml`) | harden-runner's `egress-policy`                              |
+| `harden_runner_allowlist`              | `string`  | the organisation list, pinned       | `config`                                                     |
+| `harden_runner_supplemental_allowlist` | `string`  | `''`                                | `supplemental_config`, with `supplemental_required` when set |
+| `harden_runner_supplemental_unpinned`  | `boolean` | `false`                             | `supplemental_unpinned`                                      |
+| `harden_runner_extra_endpoints`        | `string`  | `''`                                | `extra_endpoints`                                            |
+
+<!-- markdownlint-enable MD013 -->
+
+`tests/test-harden-runner-inputs.sh` fails when a workflow drops one
+of these inputs, changes its type or default, passes it in another
+form, or lets a block-action step carry on past a missing named list.
+The set thus stays the same across every `*-workflows` repository.
+
+### A supplemental list of your own organisation
+
+The organisation list covers the hosts every project needs. A project
+that reaches hosts of its own, such as ONAP's `registry.nordix.org`,
+names a supplemental list, which the action merges with the baseline
+in the same coordinate grammar. An organisation that keeps its list in
+its own `.github` repository can follow it at the default branch
+rather than a pinned commit, so a host added there takes effect on the
+next run without a pin bump in every caller:
+
+```yaml
+    with:
+      harden_runner_supplemental_allowlist: 'onap//'
+      harden_runner_supplemental_unpinned: true
+```
+
+`onap//` names the `onap` organisation's `.github` repository with no
+file path, so the action searches that repository, at its default
+branch, for the organisation's list. From an `onap` repository it
+tries these files in order, and the first that exists wins:
+
+1. `.github/harden-runner/onap/allow_list.txt`, the organisation's
+   own list;
+2. `.github/harden-runner/allow_list.txt`, the repository-wide
+   default;
+3. `.github/harden-runner/<org>/allow_list.txt`, when a single
+   organisation directory carries that file (the sole-org fallback;
+   two or more such directories match nothing).
+
+Putting the list at the first path keeps the search unambiguous. When
+none of the three exists, the job fails, because the workflows require
+a supplemental list a caller names (see
+[A missing list fails the job](#a-missing-list-fails-the-job)). The
+*Search / fallback chain* section of the action's README describes the
+search in full.
+
+The action allows an unpinned list from the caller's own
+organisation alone, so `onap//` unpinned works from an `onap`
+repository and nowhere else.
+
+### A list in another organisation
+
+A supplemental list from any other organisation must carry a pin,
+`<org>//<path>@<commit SHA>`, and `harden_runner_supplemental_unpinned`
+stays `false`. The action refuses to follow another organisation's
+default branch: a push there would otherwise change what your runners
+may reach.
+
+### A missing list fails the job
+
+Whenever a caller names `harden_runner_supplemental_allowlist`, the
+workflows also pass `supplemental_required: 'true'`. A caller naming a list
+depends on it, so a list the action cannot find fails the job at the
+block-action step, before anything runs, rather than at the first
+blocked connection. This holds under `audit` too: `linting.yaml`, whose
+default is `audit`, tolerates a failure to load the allow-list when
+the caller names no supplemental list, and at no other time.
+
+### Inline endpoints, a short-term fix
+
+`harden_runner_extra_endpoints` adds `host:port` endpoints to the
+allow-list inline, for example while a supplemental list waits for a
+review:
+
+```yaml
+    with:
+      harden_runner_extra_endpoints: 'registry.nordix.org:443'
+```
+
+Treat it as a stopgap. Endpoints passed inline live in one caller, so
+every other caller that needs the host fails until it copies them;
+the lasting fix is to add the host to the organisation's list or to a
+supplemental list. The action validates the endpoints before it
+fetches anything, and reports any the list already carries as
+redundant. The *Inline extra endpoints* section of the action's README
+gives the accepted format.
+
+### Audit trail for an unpinned list
+
+An unpinned list can change between two runs of the same commit.
+`harden-runner-block-action` records which list it read and the
+commit it resolved in its `supplemental_source` and `supplemental_sha`
+outputs, which together say which revision of the list a given run
+allowed.
 
 ## Caller filenames
 

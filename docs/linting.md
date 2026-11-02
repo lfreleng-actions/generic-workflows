@@ -726,7 +726,9 @@ abandon `block` while still reporting success. harden-runner allows
 the Actions service and cache hosts itself. The list matters under
 `block` alone, so a failure to load it stops the job there; under
 `audit` the job carries on, and an outage of the `.github` repository
-or of DNS does not fail every default call.
+or of DNS does not fail every default call. A caller that names
+`harden_runner_supplemental_allowlist` depends on that list, so a
+failure to load it stops the job under `audit` too.
 
 harden-runner's pre-step gives its agent about nine seconds, then
 reports success even if the agent has not come up. The agent
@@ -748,37 +750,44 @@ runs under `block`, so a regression of either kind fails here first.
 
 <!-- markdownlint-disable MD013 -->
 
-| Input                             | Type      | Default                           | Effect                                                  |
-| --------------------------------- | --------- | --------------------------------- | ------------------------------------------------------- |
-| `plan`                            | `string`  | `''`                              | JSON array of lint tasks; exclusive with the scalars    |
-| `hooks`                           | `string`  | `''`                              | Space/comma separated hook ids to run                   |
-| `skip_hooks`                      | `string`  | `''`                              | Hook ids to EXCLUDE; applies to every task              |
-| `ci_skipped`                      | `boolean` | `false`                           | Run the `ci.skip` set; exclusive with `hooks`           |
-| `config_path`                     | `string`  | `''`                              | Repository-relative configuration path                  |
-| `config_url`                      | `string`  | `''`                              | HTTPS configuration URL                                 |
-| `config_sha256`                   | `string`  | `''`                              | Expected digest; requires `config_url`                  |
-| `path_prefix`                     | `string`  | `.`                               | Config directory; if non-root, absence fails            |
-| `org_fallback`                    | `boolean` | `true`                            | Fall back to the organisation's `.github` repository    |
-| `org_fallback_required`           | `boolean` | `false`                           | Fail when the fallback lookup cannot reach a verdict    |
-| `org_config_path`                 | `string`  | `linting/.pre-commit-config.yaml` | Fallback path inside that repository                    |
-| `split_hooks`                     | `boolean` | `true`                            | One matrix job per SELECTED hook                        |
-| `per_hook_runs`                   | `boolean` | `false`                           | One prek invocation per hook; ignored by run-all        |
-| `commit_range`                    | `string`  | `''`                              | `<from>..<to>`; also runs commit-msg stage hooks        |
-| `fail_fast`                       | `boolean` | `false`                           | Cancel remaining lint jobs when one fails               |
-| `branch_name`                     | `string`  | `''`                              | Checkout this branch first (for `no-commit-to-branch`)  |
-| `export_github_token`             | `boolean` | `true`                            | Export the workflow token to hooks on trusted events    |
-| `prek_version`                    | `string`  | `0.4.14`                          | prek version used to run the hooks                      |
-| `rust_toolchain_setup`            | `string`  | `auto`                            | Prepare the Rust toolchain: `auto`, `true` or `false`   |
-| `rust_components`                 | `string`  | `rustfmt clippy`                  | rustup components added to each prepared toolchain      |
-| `node_setup`                      | `string`  | `auto`                            | Prepare a Node.js project: `auto`, `true` or `false`    |
-| `node_version`                    | `string`  | `''`                              | Node.js version; empty reads the project's own pin      |
-| `node_install_scripts`            | `boolean` | `false`                           | Let installs run lifecycle scripts                      |
-| `runs_on`                         | `string`  | `ubuntu-latest`                   | Runner label; Linux, and harden-runner must support it  |
-| `timeout_minutes`                 | `number`  | `15`                              | Timeout for each lint job                               |
-| `harden_runner_egress`            | `string`  | `audit`                           | `audit` or `block`                                      |
-| `harden_runner_allowlist`         | `string`  | Organisation list, pinned         | `harden-runner-block-action` `config` coordinate        |
+| Input                                  | Type      | Default                           | Effect                                                                      |
+| -------------------------------------- | --------- | --------------------------------- | --------------------------------------------------------------------------- |
+| `plan`                                 | `string`  | `''`                              | JSON array of lint tasks; exclusive with the scalars                        |
+| `hooks`                                | `string`  | `''`                              | Space/comma separated hook ids to run                                       |
+| `skip_hooks`                           | `string`  | `''`                              | Hook ids to EXCLUDE; applies to every task                                  |
+| `ci_skipped`                           | `boolean` | `false`                           | Run the `ci.skip` set; exclusive with `hooks`                               |
+| `config_path`                          | `string`  | `''`                              | Repository-relative configuration path                                      |
+| `config_url`                           | `string`  | `''`                              | HTTPS configuration URL                                                     |
+| `config_sha256`                        | `string`  | `''`                              | Expected digest; requires `config_url`                                      |
+| `path_prefix`                          | `string`  | `.`                               | Config directory; if non-root, absence fails                                |
+| `org_fallback`                         | `boolean` | `true`                            | Fall back to the organisation's `.github` repository                        |
+| `org_fallback_required`                | `boolean` | `false`                           | Fail when the fallback lookup cannot reach a verdict                        |
+| `org_config_path`                      | `string`  | `linting/.pre-commit-config.yaml` | Fallback path inside that repository                                        |
+| `split_hooks`                          | `boolean` | `true`                            | One matrix job per SELECTED hook                                            |
+| `per_hook_runs`                        | `boolean` | `false`                           | One prek invocation per hook; ignored by run-all                            |
+| `commit_range`                         | `string`  | `''`                              | `<from>..<to>`; also runs commit-msg stage hooks                            |
+| `fail_fast`                            | `boolean` | `false`                           | Cancel remaining lint jobs when one fails                                   |
+| `branch_name`                          | `string`  | `''`                              | Checkout this branch first (for `no-commit-to-branch`)                      |
+| `export_github_token`                  | `boolean` | `true`                            | Export the workflow token to hooks on trusted events                        |
+| `prek_version`                         | `string`  | `0.4.14`                          | prek version used to run the hooks                                          |
+| `rust_toolchain_setup`                 | `string`  | `auto`                            | Prepare the Rust toolchain: `auto`, `true` or `false`                       |
+| `rust_components`                      | `string`  | `rustfmt clippy`                  | rustup components added to each prepared toolchain                          |
+| `node_setup`                           | `string`  | `auto`                            | Prepare a Node.js project: `auto`, `true` or `false`                        |
+| `node_version`                         | `string`  | `''`                              | Node.js version; empty reads the project's own pin                          |
+| `node_install_scripts`                 | `boolean` | `false`                           | Let installs run lifecycle scripts                                          |
+| `runs_on`                              | `string`  | `ubuntu-latest`                   | Runner label; Linux, and harden-runner must support it                      |
+| `timeout_minutes`                      | `number`  | `15`                              | Timeout for each lint job                                                   |
+| `harden_runner_egress`                 | `string`  | `audit`                           | `audit` or `block`                                                          |
+| `harden_runner_allowlist`              | `string`  | Organisation list, pinned         | `harden-runner-block-action` `config` coordinate                            |
+| `harden_runner_supplemental_allowlist` | `string`  | `''`                              | Extra allow-list merged with the baseline, for project-specific hosts       |
+| `harden_runner_supplemental_unpinned`  | `boolean` | `false`                           | Follow the supplemental list at its default branch; same organisation alone |
+| `harden_runner_extra_endpoints`        | `string`  | `''`                              | Inline `host:port` endpoints added to the allow-list; a short-term fix      |
 
 <!-- markdownlint-enable MD013 -->
+
+The `harden_runner_*` inputs are common to every reusable workflow
+here; [Egress allow-list](../README.md#egress-allow-list) describes
+them once, with examples.
 
 ## Outputs
 

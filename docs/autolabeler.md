@@ -116,15 +116,22 @@ the `pull_request_target` line:
 
 <!-- markdownlint-disable MD013 -->
 
-| Input                     | Type     | Default               | Effect                                              |
-| ------------------------- | -------- | --------------------- | --------------------------------------------------- |
-| `config_name`             | `string` | `release-drafter.yml` | Config file resolved under `.github/`               |
-| `runs_on`                 | `string` | `ubuntu-latest`       | Runner label; Linux, because harden-runner needs it |
-| `timeout_minutes`         | `number` | `3`                   | Job timeout                                         |
-| `harden_runner_egress`    | `string` | `block`               | Egress policy: `block` or `audit`                   |
-| `harden_runner_allowlist` | `string` | `.github` v0.17.1     | Out-of-band allow-list coordinate                   |
+| Input                                  | Type      | Default               | Effect                                                                      |
+| -------------------------------------- | --------- | --------------------- | --------------------------------------------------------------------------- |
+| `config_name`                          | `string`  | `release-drafter.yml` | Config file resolved under `.github/`                                       |
+| `runs_on`                              | `string`  | `ubuntu-latest`       | Runner label; Linux, because harden-runner needs it                         |
+| `timeout_minutes`                      | `number`  | `3`                   | Job timeout                                                                 |
+| `harden_runner_egress`                 | `string`  | `block`               | Egress policy: `block` or `audit`                                           |
+| `harden_runner_allowlist`              | `string`  | `.github` v0.17.1     | Out-of-band allow-list coordinate                                           |
+| `harden_runner_supplemental_allowlist` | `string`  | `''`                  | Extra allow-list merged with the baseline, for project-specific hosts       |
+| `harden_runner_supplemental_unpinned`  | `boolean` | `false`               | Follow the supplemental list at its default branch; same organisation alone |
+| `harden_runner_extra_endpoints`        | `string`  | `''`                  | Inline `host:port` endpoints added to the allow-list; a short-term fix      |
 
 <!-- markdownlint-enable MD013 -->
+
+The `harden_runner_*` inputs are common to every reusable workflow
+here; [Egress allow-list](../README.md#egress-allow-list) describes
+them once, with examples.
 
 ## Secrets
 

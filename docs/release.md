@@ -88,14 +88,21 @@ tag pushed months ago, or a tag pointing at an outdated commit.
 
 <!-- markdownlint-disable MD013 -->
 
-| Input                                                                | Default               | Purpose                                                                                       |
-| -------------------------------------------------------------------- | --------------------- | --------------------------------------------------------------------------------------------- |
-| `ref`                                                                | `''` (triggering tag) | Git ref to check out                                                                          |
-| `mark_latest`                                                        | `true`                | Mark the promoted release as the repository's `latest`                                        |
-| `harden_runner_egress`                                               | `block`               | `block` or `audit`                                                                            |
-| `harden_runner_allowlist`                                            | central org list      | Out-of-band harden-runner allow-list configuration                                            |
+| Input                                  | Default               | Purpose                                                                     |
+| -------------------------------------- | --------------------- | --------------------------------------------------------------------------- |
+| `ref`                                  | `''` (triggering tag) | Git ref to check out                                                        |
+| `mark_latest`                          | `true`                | Mark the promoted release as the repository's `latest`                      |
+| `harden_runner_egress`                 | `block`               | `block` or `audit`                                                          |
+| `harden_runner_allowlist`              | central org list      | Out-of-band harden-runner allow-list configuration                          |
+| `harden_runner_supplemental_allowlist` | `''`                  | Extra allow-list merged with the baseline, for project-specific hosts       |
+| `harden_runner_supplemental_unpinned`  | `false`               | Follow the supplemental list at its default branch; same organisation alone |
+| `harden_runner_extra_endpoints`        | `''`                  | Inline `host:port` endpoints added to the allow-list; a short-term fix      |
 
 <!-- markdownlint-enable MD013 -->
+
+The `harden_runner_*` inputs are common to every reusable workflow
+here; [Egress allow-list](../README.md#egress-allow-list) describes
+them once, with examples.
 
 ## Outputs
 
