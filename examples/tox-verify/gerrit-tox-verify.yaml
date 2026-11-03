@@ -154,7 +154,7 @@ jobs:
       - name: 'Is the change visible to the voting account?'
         id: check
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/gerrit-change-visible-action@fa327eebc2b217aa23a42e3da4096109a009a4ed  # v0.0.2
+        uses: lfreleng-actions/gerrit-change-visible-action@627c838d6bc46945b9410e6b34a59671d68c1db6  # v0.0.3
         with:
           gerrit-change-number: ${{ inputs.GERRIT_CHANGE_NUMBER }}
           host: ${{ vars.GERRIT_SERVER }}
