@@ -322,7 +322,7 @@ own. No job loads the organisation's shared allow-list.
   `uv` and schema-validation installs that `info-yaml-validate-action`
   makes at run time.
 - The isolation legs install nothing: `change-isolation-action`
-  v0.3.1 runs on the runner's own `python3` with the standard library
+  v0.3.2 runs on the runner's own `python3` with the standard library
   alone. It needs Python 3.10 or newer, and fails with a clear
   message otherwise. `ubuntu-latest` has it; a self-hosted runner
   named in `runs_on` must provide it.

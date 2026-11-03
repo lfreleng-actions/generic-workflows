@@ -774,7 +774,7 @@ jobs:
       - name: 'Check isolation'
         id: check
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/change-isolation-action@5a002490ccc926a098f6c637e1f8363c5094999f  # v0.3.1
+        uses: lfreleng-actions/change-isolation-action@e9ec353cc88f30f74798093e68a190dfe3a430fd  # v0.3.2
         with:
           paths: ${{ matrix.paths }}
           changed-files: ${{ needs.plan.outputs.changed_files }}
