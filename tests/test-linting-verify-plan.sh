@@ -6,14 +6,13 @@
 # .github/workflows/linting-verify.yaml, for the vote rule and
 # concurrency group in
 # examples/linting-verify/gerrit-linting-verify.yaml, and for the
-# guard in .github/workflows/linting.yaml that refuses a
-# 'patchset-created' or 'comment-added' Gerrit dispatch and points it
-# here.
+# guard in .github/workflows/linting.yaml that refuses a Gerrit change
+# dispatch ('patchset-created', 'comment-added', or one carrying a
+# patchset number) and points it here.
 #
 # The plan checks path_prefix and skip_hooks, which reach
-# standalone-linting-action and prek's command line, refuses a
-# 'patchset-created' or 'comment-added' dispatch that passed no
-# refspec, and accepts only a change ref matching the one the dispatch
+# standalone-linting-action and prek's command line, refuses a Gerrit
+# change dispatch that passed no refspec, and accepts only a change ref matching the one the dispatch
 # carried; the Lint job then checks HEAD against the dispatched
 # revision. It fails closed, so most of these fixtures are rejection
 # cases: a mistake that lets an unsafe value through hands it to that
@@ -638,8 +637,10 @@ fi
 # gerrit_to_platform dispatches on the target branch, so a
 # 'patchset-created' dispatch whose caller dropped gerrit_refspec would
 # fall into GitHub mode and lint the branch tip; so would a
-# 'comment-added' one, a recheck say. The plan reads the
-# caller's event input and the refspec through 'env'. These run the
+# 'comment-added' one, a recheck say, and a hybrid caller's, which
+# github2gerrit drives with a patchset number but no event type or
+# refspec. The plan reads the caller's event input, its patchset
+# number and the refspec through 'env'. These run the
 # extracted logic; they cannot show that GitHub hands a called
 # workflow the caller's event inputs.
 for line in \
@@ -652,8 +653,10 @@ for line in \
   fi
 done
 
-dispatch_refused="A 'patchset-created' or 'comment-added' Gerrit"
-dispatch_refused+=" dispatch passed no gerrit_refspec"
+dispatch_refused="A Gerrit change dispatch ('patchset-created',"
+dispatch_refused+=" 'comment-added', or one carrying a"
+dispatch_refused+=" GERRIT_PATCHSET_NUMBER but no refspec) passed no"
+dispatch_refused+=" gerrit_refspec"
 dispatch_cases() {
   local event
   for event in patchset-created comment-added; do
@@ -674,22 +677,59 @@ dispatch_cases() {
   expect_plan_ok 'empty event type without a refspec' \
     CALLER_GERRIT_EVENT_TYPE= INPUT_GERRIT_REFSPEC=
   expect_plan_ok 'no event type without a refspec'
+  # A hybrid caller's dispatch: a change and patchset, no event type
+  # and no refspec. Refused without a gerrit_refspec, accepted with
+  # one; the error echoes neither number.
+  expect_plan_error 'patchset number alone without a refspec' \
+    "${dispatch_refused}" CALLER_GERRIT_PATCHSET_NUMBER=137 \
+    CALLER_GERRIT_CHANGE_NUMBER= CALLER_GERRIT_EVENT_TYPE= \
+    INPUT_GERRIT_REFSPEC=
+  expect_plan_error 'hybrid dispatch without a refspec, change number' \
+    "${dispatch_refused}" CALLER_GERRIT_CHANGE_NUMBER=46421 \
+    CALLER_GERRIT_PATCHSET_NUMBER=137 INPUT_GERRIT_REFSPEC=
+  expect_plan_ok 'patchset number alone with a refspec' \
+    CALLER_GERRIT_PATCHSET_NUMBER=1 \
+    INPUT_GERRIT_REFSPEC='refs/changes/21/46421/1'
+  expect_plan_error 'patchset-created and a patchset number, no refspec' \
+    "${dispatch_refused}" CALLER_GERRIT_PATCHSET_NUMBER=137 \
+    CALLER_GERRIT_EVENT_TYPE='patchset-created' INPUT_GERRIT_REFSPEC=
+  # Only 'change-merged', matched exactly, keeps GitHub mode with a
+  # patchset number; any other event type with one is refused, and
+  # never echoed.
+  expect_plan_ok 'change-merged with a patchset number, no refspec' \
+    CALLER_GERRIT_EVENT_TYPE='change-merged' \
+    CALLER_GERRIT_PATCHSET_NUMBER=137 INPUT_GERRIT_REFSPEC=
+  expect_plan_error 'Change-Merged with a patchset number, no refspec' \
+    "${dispatch_refused}" CALLER_GERRIT_EVENT_TYPE='Change-Merged' \
+    CALLER_GERRIT_PATCHSET_NUMBER=137 INPUT_GERRIT_REFSPEC=
+  expect_plan_error 'other event type with a patchset number' \
+    "${dispatch_refused}" CALLER_GERRIT_EVENT_TYPE='ref-updated-x' \
+    CALLER_GERRIT_PATCHSET_NUMBER=137 INPUT_GERRIT_REFSPEC=
+  expect_plan_ok 'empty patchset number and event type, no refspec' \
+    CALLER_GERRIT_PATCHSET_NUMBER= CALLER_GERRIT_EVENT_TYPE= \
+    INPUT_GERRIT_REFSPEC=
 }
 dispatch_cases
 
-# Each refused event type, dropped from a copy of the plan, and the
-# match, loosened to a prefix or made case-insensitive, must fail the
-# cases above.
+# Each refused event type, dropped from a copy of the plan, the match,
+# loosened to a prefix or made case-insensitive, the patchset clause
+# dropped or made to ignore the number, the 'change-merged' exemption
+# dropped, and the refspec ignored, must fail the cases above.
 dispatch_mutant() {
   case "$1" in
     no-patchset-created) sed '/^ *"patchset-created",$/d' ;;
     no-comment-added) sed '/^ *"comment-added",$/d' ;;
-    prefix) sed 's/if event in (/if event.startswith((/; s/^\( *\)) and not environ.get("INPUT_GERRIT_REFSPEC"/\1)) and not environ.get("INPUT_GERRIT_REFSPEC"/' ;;
-    any-case) sed 's/if event in (/if event.lower() in (/' ;;
+    prefix) sed 's/change_dispatch = event in (/change_dispatch = event.startswith((/; s/^\( *\)) or (patchset/\1)) or (patchset/' ;;
+    any-case) sed 's/change_dispatch = event in (/change_dispatch = event.lower() in (/' ;;
+    no-patchset) sed 's/) or (patchset != "" and event != "change-merged")/)/' ;;
+    any-patchset) sed 's/(patchset != "" and event/(event/' ;;
+    no-change-merged) sed 's/(patchset != "" and event != "change-merged")/(patchset != "")/' ;;
+    ignore-refspec) sed 's/^\( *\)"INPUT_GERRIT_REFSPEC", ""$/\1"NO_SUCH_INPUT", ""/' ;;
   esac < "${real_plan_script}"
 }
 real_plan_script="${plan_script}"
-for shape in no-patchset-created no-comment-added prefix any-case; do
+for shape in no-patchset-created no-comment-added prefix any-case \
+  no-patchset any-patchset no-change-merged ignore-refspec; do
   plan_script="${workdir}/plan-dispatch-${shape}.py"
   dispatch_mutant "${shape}" > "${plan_script}"
   if cmp -s "${plan_script}" "${real_plan_script}"; then
@@ -864,8 +904,8 @@ for shape in no-change no-patchset int-change int-patchset; do
 done
 plan_script="${real_plan_script}"
 # An empty gerrit_refspec selects GitHub mode, which check_dispatch
-# governs: right for 'change-merged', refused for 'patchset-created'
-# and 'comment-added'.
+# governs: right for 'change-merged', refused for 'patchset-created',
+# 'comment-added' and a dispatch carrying a patchset number.
 expect_plan_ok 'change-merged, GitHub mode, dispatch carries a refspec' \
   INPUT_GERRIT_REFSPEC= CALLER_GERRIT_REFSPEC=refs/changes/45/12345/1 \
   CALLER_GERRIT_EVENT_TYPE='change-merged'
@@ -1620,13 +1660,15 @@ done
 
 # A per-patchset Gerrit dispatch runs on the target branch, so
 # linting.yaml would lint the branch tip, not the change; so does a
-# recheck ('comment-added'). Its plan job's 'Guard trigger and
-# validate inputs' step refuses those two dispatches and nothing else.
+# recheck ('comment-added'), and a hybrid caller's dispatch, which
+# carries a patchset number but no event type. Its plan job's 'Guard
+# trigger and validate inputs' step refuses those dispatches and
+# nothing else.
 # These run the extracted guard logic; they cannot show that GitHub
 # hands a called workflow the caller's event inputs.
 
 # The guard lives once, in the plan job's step of that name, before
-# the lint job starts, and reads the caller's input through 'env'.
+# the lint job starts, and reads the caller's inputs through 'env'.
 guard_lines=$(grep -n '# BEGIN linting_patchset_guard$' "${linting}" |
   cut -d: -f1)
 guard_step=$(grep -n "name: 'Guard trigger and validate inputs'" \
@@ -1649,22 +1691,35 @@ if [ "${guard_env}" -eq 1 ]; then
 else
   fail "the guard step does not read GERRIT_EVENT_TYPE through 'env'"
 fi
+guard_env=$(sed -n "${guard_step:-1},${guard_lines:-1}p" "${linting}" |
+  grep -cxF \
+    "          CALLER_GERRIT_PATCHSET_NUMBER: \${{ github.event.inputs.GERRIT_PATCHSET_NUMBER }}" ||
+  true)
+if [ "${guard_env}" -eq 1 ]; then
+  pass
+else
+  fail "the guard step does not read GERRIT_PATCHSET_NUMBER through 'env'"
+fi
 
-# run_guard <event name> [<GERRIT_EVENT_TYPE>]: sets guard_rc and
-# guard_log. With no second argument the input is absent altogether.
+# run_guard <event name> [<GERRIT_EVENT_TYPE> [<GERRIT_PATCHSET_NUMBER>]]:
+# sets guard_rc and guard_log. An input with no argument is absent
+# altogether.
 run_guard() {
+  local inputs=()
   guard_rc=0
   if [ "$#" -ge 2 ]; then
-    guard_log=$(env -i PATH="${PATH}" GITHUB_EVENT_NAME="$1" \
-      CALLER_GERRIT_EVENT_TYPE="$2" \
-      bash -euo pipefail "${guard_script}" 2>&1) || guard_rc=$?
-  else
-    guard_log=$(env -i PATH="${PATH}" GITHUB_EVENT_NAME="$1" \
-      bash -euo pipefail "${guard_script}" 2>&1) || guard_rc=$?
+    inputs+=("CALLER_GERRIT_EVENT_TYPE=$2")
   fi
+  if [ "$#" -ge 3 ]; then
+    inputs+=("CALLER_GERRIT_PATCHSET_NUMBER=$3")
+  fi
+  guard_log=$(env -i PATH="${PATH}" GITHUB_EVENT_NAME="$1" \
+    "${inputs[@]}" bash -euo pipefail "${guard_script}" 2>&1) ||
+    guard_rc=$?
 }
 
-# expect_guard_pass <label> <event name> [<GERRIT_EVENT_TYPE>]
+# expect_guard_pass <label> <event name> [<GERRIT_EVENT_TYPE>
+# [<GERRIT_PATCHSET_NUMBER>]]
 expect_guard_pass() {
   local label="$1"
   shift
@@ -1676,26 +1731,42 @@ expect_guard_pass() {
   fi
 }
 
-guard_message="::error::linting.yaml cannot lint a 'patchset-created'"
-guard_message+=" or 'comment-added' Gerrit dispatch: a Gerrit dispatch"
-guard_message+=" runs on the branch, so it would lint the branch tip,"
-guard_message+=" not the change. Call linting-verify.yaml instead."
+guard_message="::error::linting.yaml cannot lint a Gerrit change"
+guard_message+=" dispatch ('patchset-created', 'comment-added', or one"
+guard_message+=" carrying a GERRIT_PATCHSET_NUMBER, as a hybrid caller's"
+guard_message+=" does with no refspec): a Gerrit dispatch runs on the"
+guard_message+=" branch, so it would lint the branch tip, not the change."
+guard_message+=" Call linting-verify.yaml instead."
 
-# expect_guard_refusal <GERRIT_EVENT_TYPE>: a workflow_dispatch
-# carrying it fails with exactly the message, echoing no value.
+# expect_guard_refusal <GERRIT_EVENT_TYPE> [<GERRIT_PATCHSET_NUMBER>]:
+# a workflow_dispatch carrying them fails with exactly the message,
+# echoing no value.
 expect_guard_refusal() {
-  run_guard workflow_dispatch "$1"
+  run_guard workflow_dispatch "$@"
   if [ "${guard_rc}" -ne 0 ] &&
     [ "${guard_log}" = "${guard_message}" ]; then
     pass
   else
-    fail "guard, $1 dispatch: expected a refusal" "${guard_log}"
+    fail "guard, '$1' dispatch${2:+ with patchset $2}: expected a refusal" \
+      "${guard_log}"
   fi
 }
 
 guard_cases() {
   expect_guard_refusal patchset-created
   expect_guard_refusal comment-added
+  expect_guard_refusal patchset-created 137
+  # A hybrid caller's dispatch: a patchset number, no event type.
+  expect_guard_refusal '' 137
+  # Only 'change-merged', matched exactly, passes with a patchset
+  # number; any other event type with one is refused.
+  expect_guard_refusal 'Change-Merged' 137
+  expect_guard_refusal 'ref-updated-x' 137
+  expect_guard_pass 'change-merged dispatch with a patchset number' \
+    workflow_dispatch change-merged 137
+  expect_guard_pass 'dispatch, empty event type and patchset number' \
+    workflow_dispatch '' ''
+  expect_guard_pass 'push, carrying a patchset number' push '' 137
   expect_guard_pass 'change-merged dispatch' workflow_dispatch \
     change-merged
   expect_guard_pass 'dispatch, empty GERRIT_EVENT_TYPE' workflow_dispatch ''
@@ -1714,8 +1785,10 @@ guard_cases() {
 guard_cases
 
 # Each refused event type dropped from a copy of the guard, the match
-# loosened to a prefix or made case-insensitive, and the
-# workflow_dispatch condition dropped, must fail the cases above.
+# loosened to a prefix or made case-insensitive, the workflow_dispatch
+# condition dropped, the patchset clause dropped or made to ignore the
+# number, and the 'change-merged' exemption dropped, must fail the
+# cases above.
 guard_mutant() {
   case "$1" in
     no-patchset-created) sed "s/= 'patchset-created' \]/= 'x-patchset-created' ]/" ;;
@@ -1723,11 +1796,14 @@ guard_mutant() {
     prefix) sed "s/\[ \"\${CALLER_GERRIT_EVENT_TYPE:-}\" = 'comment-added' \]/[[ \"\${CALLER_GERRIT_EVENT_TYPE:-}\" == comment-added* ]]/" ;;
     any-case) sed "s/\"\${CALLER_GERRIT_EVENT_TYPE:-}\"/\"\${CALLER_GERRIT_EVENT_TYPE,,}\"/g" ;;
     any-event) sed "s/\[ \"\$GITHUB_EVENT_NAME\" = 'workflow_dispatch' \]/true/" ;;
+    no-patchset) sed "s/\[ -n \"\${CALLER_GERRIT_PATCHSET_NUMBER:-}\" \]/false/" ;;
+    any-patchset) sed "s/\[ -n \"\${CALLER_GERRIT_PATCHSET_NUMBER:-}\" \]/true/" ;;
+    no-change-merged) sed "s/\[ \"\${CALLER_GERRIT_EVENT_TYPE:-}\" != 'change-merged' \]/true/" ;;
   esac < "${real_guard_script}"
 }
 real_guard_script="${guard_script}"
 for shape in no-patchset-created no-comment-added prefix any-case \
-  any-event; do
+  any-event no-patchset any-patchset no-change-merged; do
   guard_script="${workdir}/guard-${shape}.sh"
   guard_mutant "${shape}" > "${guard_script}"
   if cmp -s "${guard_script}" "${real_guard_script}"; then

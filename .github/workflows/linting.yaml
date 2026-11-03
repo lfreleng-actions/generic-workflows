@@ -530,6 +530,10 @@ jobs:
           # so this is the GERRIT_EVENT_TYPE input gerrit_to_platform
           # dispatched the caller with; empty for any other event.
           CALLER_GERRIT_EVENT_TYPE: ${{ github.event.inputs.GERRIT_EVENT_TYPE }}
+          # The patchset number the same dispatch carried; a hybrid
+          # caller github2gerrit drives sends it with no event type.
+          # yamllint disable-line rule:line-length
+          CALLER_GERRIT_PATCHSET_NUMBER: ${{ github.event.inputs.GERRIT_PATCHSET_NUMBER }}
         run: |
           # Guard trigger and validate inputs
           set -euo pipefail
@@ -729,23 +733,33 @@ jobs:
           # branch, never on its refspec, and this workflow checks out
           # the triggering commit: for a new patchset, the branch tip,
           # which does not hold the change. A recheck ('comment-added')
-          # arrives on the branch too. Linting it could report green
-          # having never seen the change, so refuse a 'patchset-created'
-          # or 'comment-added' dispatch, matched in full and
-          # case-sensitively. 'change-merged' stays allowed, though it
-          # can arrive before the mirror replicates the merge;
-          # docs/linting.md says to dispatch only after replication. A
-          # push, pull request or schedule carries no such input and
-          # passes.
+          # arrives on the branch too, and so does a hybrid caller's
+          # dispatch, which github2gerrit drives with a change and
+          # patchset but no event type or refspec. Linting it could
+          # report green having never seen the change, so refuse a
+          # Gerrit change dispatch: a 'patchset-created' or
+          # 'comment-added' one, or any other carrying a
+          # GERRIT_PATCHSET_NUMBER, the event types matched in full and
+          # case-sensitively. 'change-merged' stays allowed, with or
+          # without a patchset number, though it can arrive before the
+          # mirror replicates the merge; docs/linting.md says to
+          # dispatch only after replication. A dispatch with neither
+          # input, and a push, pull request or schedule, which carry no
+          # such input, pass.
           # BEGIN linting_patchset_guard
           if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ] && {
             [ "${CALLER_GERRIT_EVENT_TYPE:-}" = 'patchset-created' ] ||
-              [ "${CALLER_GERRIT_EVENT_TYPE:-}" = 'comment-added' ]
+              [ "${CALLER_GERRIT_EVENT_TYPE:-}" = 'comment-added' ] || {
+              [ -n "${CALLER_GERRIT_PATCHSET_NUMBER:-}" ] &&
+                [ "${CALLER_GERRIT_EVENT_TYPE:-}" != 'change-merged' ]
+            }
           }; then
-            echo "::error::linting.yaml cannot lint a 'patchset-created'" \
-              "or 'comment-added' Gerrit dispatch: a Gerrit dispatch" \
-              "runs on the branch, so it would lint the branch tip," \
-              "not the change. Call linting-verify.yaml instead."
+            echo "::error::linting.yaml cannot lint a Gerrit change" \
+              "dispatch ('patchset-created', 'comment-added', or one" \
+              "carrying a GERRIT_PATCHSET_NUMBER, as a hybrid caller's" \
+              "does with no refspec): a Gerrit dispatch runs on the" \
+              "branch, so it would lint the branch tip, not the change." \
+              "Call linting-verify.yaml instead."
             exit 1
           fi
           # END linting_patchset_guard

@@ -822,10 +822,14 @@ the caller runs:
   this workflow checks out the triggering commit with no Gerrit
   inputs: it would lint the branch tip, which does not contain the
   change, and could report green having linted the wrong tree. A
-  recheck, a `comment-added` dispatch, arrives on the branch too. The
-  plan job refuses such a caller: a `workflow_dispatch` whose
-  `GERRIT_EVENT_TYPE` input is `patchset-created` or `comment-added`
-  fails with an error naming `linting-verify.yaml`.
+  recheck, a `comment-added` dispatch, arrives on the branch too, as
+  does a hybrid caller's dispatch, which github2gerrit drives with
+  `GERRIT_CHANGE_URL` and `GERRIT_PATCHSET_NUMBER` but no
+  `GERRIT_EVENT_TYPE` or `GERRIT_REFSPEC`. The plan job refuses such a
+  caller: a `workflow_dispatch` whose `GERRIT_EVENT_TYPE` input is
+  `patchset-created` or `comment-added`, or that carries a non-empty
+  `GERRIT_PATCHSET_NUMBER` unless its `GERRIT_EVENT_TYPE` is
+  `change-merged`, fails with an error naming `linting-verify.yaml`.
 - **After merge**, a `push` caller on the GitHub mirror or a
   `change-merged` dispatch, migrates here. The `push` trigger is the
   recommended post-merge model: it fires on the replicated commit, so

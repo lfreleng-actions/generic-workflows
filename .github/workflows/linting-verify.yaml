@@ -376,7 +376,8 @@ jobs:
           # event, and for a hybrid caller github2gerrit drives.
           CALLER_GERRIT_REFSPEC: ${{ github.event.inputs.GERRIT_REFSPEC }}
           # The change and patchset the same dispatch names, which the
-          # caller votes on; empty as the refspec is.
+          # caller votes on; empty for any other event. A hybrid
+          # caller's dispatch carries them with no refspec.
           # yamllint disable-line rule:line-length
           CALLER_GERRIT_CHANGE_NUMBER: ${{ github.event.inputs.GERRIT_CHANGE_NUMBER }}
           # yamllint disable-line rule:line-length
@@ -476,22 +477,33 @@ jobs:
 
           def check_dispatch(environ):
               # gerrit_to_platform dispatches on the target branch, so
-              # a patchset dispatch with no refspec would select GitHub
-              # mode and lint the branch tip, not the change. A
-              # 'comment-added' dispatch, a recheck say, arrives on the
-              # branch too. Any other event, 'change-merged' included,
-              # keeps GitHub mode. The match is exact and the event
-              # type is never echoed.
+              # a Gerrit change dispatch with no refspec would select
+              # GitHub mode and lint the branch tip, not the change.
+              # That is a 'patchset-created' dispatch, a
+              # 'comment-added' one (a recheck, say), or any other
+              # carrying a patchset number: a hybrid caller that
+              # github2gerrit drives sends a change and patchset with
+              # no event type or refspec. Only 'change-merged', which
+              # may carry a patchset number, and a dispatch with
+              # neither keep GitHub mode. The matches are exact and no
+              # value is ever echoed.
               event = environ.get("CALLER_GERRIT_EVENT_TYPE", "")
-              if event in (
+              patchset = environ.get("CALLER_GERRIT_PATCHSET_NUMBER", "")
+              change_dispatch = event in (
                   "patchset-created",
                   "comment-added",
-              ) and not environ.get("INPUT_GERRIT_REFSPEC", ""):
+              ) or (patchset != "" and event != "change-merged")
+              if change_dispatch and not environ.get(
+                  "INPUT_GERRIT_REFSPEC", ""
+              ):
                   error(
-                      "A 'patchset-created' or 'comment-added' Gerrit"
-                      " dispatch passed no gerrit_refspec, so the Lint"
-                      " job would lint the branch tip, not the change;"
-                      " pass the dispatch's GERRIT_REFSPEC as"
+                      "A Gerrit change dispatch ('patchset-created',"
+                      " 'comment-added', or one carrying a"
+                      " GERRIT_PATCHSET_NUMBER but no refspec) passed no"
+                      " gerrit_refspec, so the Lint job would lint the"
+                      " branch tip, not the change; pass the dispatch's"
+                      " GERRIT_REFSPEC, or its change's"
+                      " refs/changes/NN/<change>/<patchset> ref, as"
                       " gerrit_refspec"
                   )
 
@@ -544,7 +556,8 @@ jobs:
                   )
               # When the dispatch carries the refspec, the caller must
               # pass that one. An empty gerrit_refspec is left to
-              # check_dispatch: GitHub mode is right for 'change-merged'.
+              # check_dispatch: GitHub mode is right for 'change-merged'
+              # and for a dispatch carrying no patchset number.
               dispatched = environ.get("CALLER_GERRIT_REFSPEC", "")
               if dispatched and refspec != dispatched:
                   error(
