@@ -59,6 +59,7 @@ rules:
       - github-tox-verify.yaml:45
       - gerrit-ci-management-verify.yaml:223
       - gerrit-ci-management-merge.yaml:221
+      - gerrit-linting-verify.yaml:284
 
   stale-action-refs:
     ignore:
@@ -89,6 +90,7 @@ rules:
       - github-tox-verify.yaml:45
       - gerrit-ci-management-verify.yaml:223
       - gerrit-ci-management-merge.yaml:221
+      - gerrit-linting-verify.yaml:284
 
   secrets-outside-env:
     ignore:
@@ -127,3 +129,8 @@ rules:
       - gerrit-ci-management-merge.yaml:170
       - gerrit-ci-management-merge.yaml:203
       - gerrit-ci-management-merge.yaml:267
+      # The Gerrit linting verify example hands the voting account's
+      # key to the same two actions, for the same reason.
+      - gerrit-linting-verify.yaml:235
+      - gerrit-linting-verify.yaml:267
+      - gerrit-linting-verify.yaml:341

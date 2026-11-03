@@ -8,13 +8,18 @@
 # allow-list through lfreleng-actions/harden-runner-block-action must
 # expose the same five harden_runner_* inputs, pass every one of them
 # through on each block-action step in one fixed form, and pin the
-# action at the same release. Each input's description must match the
-# reference wording held below, whitespace aside. A block-action step
-# may tolerate its own failure only under 'audit' with no supplemental
-# list named, so a caller's missing list fails the job as
-# supplemental_required says. The set is rolled out to every
-# '*-workflows' repository, so this script names nothing specific to
-# any one of them: copy it unchanged.
+# action at the same release. extra_endpoints alone has a second form:
+# one earlier job's output followed by the caller's input, for an
+# endpoint the workflow resolves at run time and wants DNS-checked.
+# The output comes first because the loader strips a '#' comment to
+# the end of its line, and a comment ending the caller's value would
+# swallow an output placed after it. Each input's description must
+# match the reference wording held below, whitespace aside. A
+# block-action step may tolerate its own failure only under 'audit'
+# with no supplemental list named, so a caller's missing list fails
+# the job as supplemental_required says. The set is rolled out to
+# every '*-workflows' repository, so this script names nothing
+# specific to any one of them: copy it unchanged.
 #
 # It first checks the real workflows, then mutates a copy of one of
 # them in each way the check must catch and expects each mutant to
@@ -44,6 +49,7 @@ fi
 python3 -I - "${workflows}" <<'PYEOF'
 import copy
 import pathlib
+import re
 import sys
 import tempfile
 
@@ -104,6 +110,19 @@ PASS_THROUGH = {
     ),
     "extra_endpoints": "${{ inputs.harden_runner_extra_endpoints }}",
 }
+
+# extra_endpoints may also carry one endpoint the workflow resolved in
+# an earlier job, ahead of the caller's input, so the loader's DNS
+# check covers it as well: one job output first, then the caller's
+# input unchanged, nothing else. The output goes first because the
+# loader strips a '#' comment to the end of its line: a caller's value
+# ending in one would swallow an output appended after it.
+EXTRA_MERGED = re.compile(
+    r"\$\{\{ format\('\{0\} \{1\}',"
+    r" needs\.[A-Za-z_][A-Za-z0-9_-]*\.outputs\.[A-Za-z_][A-Za-z0-9_-]*,"
+    r" inputs\.harden_runner_extra_endpoints\) \}\}\Z",
+    re.ASCII,
+)
 
 # The one continue-on-error a block-action step may carry, besides none
 # or false: a step that tolerates any other failure would swallow the
@@ -175,6 +194,10 @@ def check_doc(doc):
         for key, expected in PASS_THROUGH.items():
             if key not in given:
                 problems.append(f"{where} does not pass {key}")
+            elif key == "extra_endpoints" and isinstance(
+                given[key], str
+            ) and EXTRA_MERGED.match(given[key]):
+                continue
             elif given[key] != expected:
                 problems.append(f"{where} passes {key} as {given[key]!r}")
     return problems
@@ -238,6 +261,22 @@ def mutants(doc):
         "${{ inputs.harden_runner_supplemental_unpinned }}"
     )
     yield "supplemental_unpinned in another form", d
+    for label, value in (
+        ("extra_endpoints drops the caller's input",
+         "${{ needs.gerrit.outputs.endpoint }}"),
+        ("extra_endpoints merges another input",
+         "${{ format('{0} {1}', inputs.other,"
+         " inputs.harden_runner_extra_endpoints) }}"),
+        ("extra_endpoints puts the caller's input first",
+         "${{ format('{0} {1}', inputs.harden_runner_extra_endpoints,"
+         " needs.gerrit.outputs.endpoint) }}"),
+        ("extra_endpoints merges two outputs",
+         "${{ format('{0} {1} {2}', needs.a.outputs.b, needs.c.outputs.d,"
+         " inputs.harden_runner_extra_endpoints) }}"),
+    ):
+        d = copy.deepcopy(doc)
+        first_with(d)["extra_endpoints"] = value
+        yield label, d
     d = copy.deepcopy(doc)
     for _, step, _ in block_steps(d):
         step["uses"] = f"{ACTION}@{'0' * 40}"

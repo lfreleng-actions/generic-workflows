@@ -171,8 +171,18 @@ runs pre-commit hooks with [prek](https://github.com/j178/prek),
 standalone from pre-commit.ci. A thin `linting.yaml` caller in each
 repository delegates to it on whichever events that repository
 supports — pull requests where they exist, and `push` for the Gerrit
-mirrors, which never see one. The workflow supersedes
-`compose-repo-linting.yaml` in `lfit/releng-reusable-workflows`.
+mirrors, which never see one. For that post-merge model the workflow
+supersedes `compose-repo-linting.yaml` in
+`lfit/releng-reusable-workflows`; a Gerrit caller that lints each
+patchset uses the
+[linting verify reusable workflow](#linting-verify-reusable-workflow)
+instead. For a post-merge caller, the linting reusable matches the
+legacy behaviour apart from the `node_setup` and
+`rust_toolchain_setup` defaults: a caller whose repository holds a
+`package.json` and lockfile or a `Cargo.toml` sets both to `'false'`
+to keep that behaviour, as
+[the migration notes](docs/linting.md#migration-from-compose-repo-linting)
+describe.
 
 It serves two populations. Repositories with **no** pre-commit.ci at
 all — every Gerrit-mirrored project among them — need something to run
@@ -556,6 +566,44 @@ Copy the caller from
 inputs, the deploy-branch rule, the ancestry check, and the migration
 of each consumer.
 
+## Linting verify reusable workflow
+
+[`.github/workflows/linting-verify.yaml`](.github/workflows/linting-verify.yaml)
+lints a Gerrit change per patchset. A `Lint` job checks the change
+out, removes the Gerrit checkout's persisted token, and runs every
+pre-commit-stage hook in the change's pre-commit configuration but
+those named in `skip_hooks`; commit-msg hooks such as gitlint do not
+run, as in the legacy workflow. The workflow replaces
+`compose-repo-linting.yaml` in `lfit/releng-reusable-workflows` for
+its per-patchset callers, where `linting.yaml` cannot:
+gerrit_to_platform dispatches on the target branch, so `linting.yaml`
+would lint the branch tip, not the change.
+
+```yaml
+jobs:
+  linting-verify:
+    name: 'Linting Verify'
+    permissions:
+      contents: read
+    # Pin a real generic-workflows release SHA in place of <SHA>.
+    uses: lfreleng-actions/generic-workflows/.github/workflows/linting-verify.yaml@<SHA>
+    with:
+      gerrit_refspec: ${{ inputs.GERRIT_REFSPEC }}
+      gerrit_project: ${{ inputs.GERRIT_PROJECT }}
+      gerrit_branch: ${{ inputs.GERRIT_BRANCH }}
+```
+
+As with ci-management verify, the reusable casts no vote, and the
+Gerrit example caller checks that the voting account can read the
+change first. The legacy workflow ran actionlint on every repository;
+this one runs it as a hook, if the repository defines one that
+installs itself, and installs no `actionlint` executable. A migrating
+repository without the hook adds `actionlint-py`, and one with a
+`language: system` actionlint hook replaces it. Start from the caller in
+[`examples/linting-verify/`](examples/linting-verify/), and see
+[`docs/linting-verify.md`](docs/linting-verify.md) for the inputs,
+the credential handling, and the migration of each consumer.
+
 ## Egress allow-list
 
 Every reusable workflow here that loads its egress allow-list through
@@ -563,7 +611,8 @@ Every reusable workflow here that loads its egress allow-list through
 takes the same five inputs, and passes them to every block-action step
 it runs: `autolabeler.yaml`, `ci-management-merge.yaml`,
 `ci-management-verify.yaml`, `clear-action-cache.yaml`, `linting.yaml`,
-`release.yaml`, `semantic-pull-request.yaml` and `tox-verify.yaml`.
+`linting-verify.yaml`, `release.yaml`, `semantic-pull-request.yaml` and
+`tox-verify.yaml`.
 Each workflow's own reference lists them and links here. Jobs that
 talk to GitHub alone, such as the `gerrit` and `plan` jobs, use a
 fixed `github.com:443` list instead and take none of them.
@@ -584,6 +633,13 @@ fixed `github.com:443` list instead and take none of them.
 of these inputs, changes its type or default, passes it in another
 form, or lets a block-action step carry on past a missing named list.
 The set thus stays the same across every `*-workflows` repository.
+`extra_endpoints` has one other accepted form: one earlier job's
+output followed by the caller's input. `linting-verify.yaml` uses it
+to add the Gerrit endpoint its `gerrit` job validated, so the
+loader's DNS check covers that endpoint too. The output comes first
+because the loader strips a `#` comment to the end of its line, so a
+caller's value ending in one would swallow an output placed after
+it.
 
 ### A supplemental list of your own organisation
 
@@ -679,10 +735,12 @@ repository carry an `-action` suffix (`release-action.yaml`,
 `semantic-pull-request-action.yaml`, `linting-action.yaml`,
 `clear-action-cache-action.yaml`, `autolabeler-action.yaml`,
 `change-isolation-action.yaml`, `tox-verify-action.yaml`,
-`ci-management-verify-action.yaml`) because a caller here cannot share
+`ci-management-verify-action.yaml`, `linting-verify-action.yaml`)
+because a caller here cannot share
 a filename with the reusable it calls. Do not copy that suffix into a
 consuming repository. Gerrit verify callers, such as the change
-isolation, tox verify and ci-management verify examples, follow
+isolation, tox verify, ci-management verify and linting verify
+examples, follow
 gerrit_to_platform's naming instead: the filename must contain both
 `gerrit` and `verify`, and must not contain `required`, which
 gerrit_to_platform keeps for an organisation's required workflows.
@@ -692,8 +750,8 @@ place of `verify`.
 ## Gerrit support
 
 Gerrit-mirrored projects use these workflows unchanged. Apart from
-change isolation, tox verify and ci-management verify, none of the
-reusables here takes
+change isolation, tox verify, ci-management verify and linting
+verify, none of the reusables here takes
 Gerrit *checkout* inputs, and none performs a dual checkout. The
 release reusable keeps `require_gerrit`, which verifies a tag's
 signing key against a Gerrit account and has nothing to do with
@@ -718,10 +776,20 @@ no Gerrit inputs either, and cannot: Gerrit projects review changes in
 Gerrit, so their GitHub mirror receives no pull requests for it to
 read. The autolabeler is out for the same reason, having no pull
 request to label. The linting reusable takes no Gerrit checkout
-inputs; a Gerrit project calls it from a `push` trigger on the mirror.
+inputs; a Gerrit project calls it after merge, and a `push` trigger on
+the mirror, which fires on the replicated commit, is the recommended
+way. A `change-merged` dispatch can arrive before the mirror
+replicates the merge, so the linting reusable may lint the previous
+tip; a caller using one must not dispatch until it has confirmed
+replication, as
+[the ancestry check](docs/ci-management-merge.md#the-ancestry-check)
+describes for ci-management merge. To lint each patchset before it
+merges, a Gerrit project calls linting verify instead; the linting
+reusable refuses a `patchset-created` or `comment-added` dispatch,
+since a recheck also arrives on the target branch.
 
-Change isolation, tox verify and ci-management verify are the
-exceptions, because they run per patchset: gerrit_to_platform
+Change isolation, tox verify, ci-management verify and linting verify
+are the exceptions, because they run per patchset: gerrit_to_platform
 dispatches their callers for each change, and each reusable checks
 that change out with
 `checkout-gerrit-change-action` whenever the caller passes
@@ -747,9 +815,11 @@ autolabeler, [`docs/change-isolation.md`](docs/change-isolation.md)
 for change isolation, [`docs/tox-verify.md`](docs/tox-verify.md)
 for tox verify,
 [`docs/ci-management-verify.md`](docs/ci-management-verify.md) for
-ci-management verify, and
+ci-management verify,
 [`docs/ci-management-merge.md`](docs/ci-management-merge.md) for
-ci-management merge.
+ci-management merge, and
+[`docs/linting-verify.md`](docs/linting-verify.md) for linting
+verify.
 
 [pre-commit.ci results page]: https://results.pre-commit.ci/latest/github/lfreleng-actions/generic-workflows/main
 [pre-commit.ci status badge]: https://results.pre-commit.ci/badge/github/lfreleng-actions/generic-workflows/main.svg

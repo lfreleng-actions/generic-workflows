@@ -526,6 +526,10 @@ jobs:
           # where the hooks and the runner share an owner.
           # yamllint disable-line rule:line-length
           TRUSTED_EVENT: ${{ (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'true' || 'false' }}
+          # In a called workflow 'github.event' is the caller's event,
+          # so this is the GERRIT_EVENT_TYPE input gerrit_to_platform
+          # dispatched the caller with; empty for any other event.
+          CALLER_GERRIT_EVENT_TYPE: ${{ github.event.inputs.GERRIT_EVENT_TYPE }}
         run: |
           # Guard trigger and validate inputs
           set -euo pipefail
@@ -720,6 +724,31 @@ jobs:
               "schedule or workflow_dispatch"
             exit 1
           fi
+
+          # gerrit_to_platform dispatches a caller on the change's target
+          # branch, never on its refspec, and this workflow checks out
+          # the triggering commit: for a new patchset, the branch tip,
+          # which does not hold the change. A recheck ('comment-added')
+          # arrives on the branch too. Linting it could report green
+          # having never seen the change, so refuse a 'patchset-created'
+          # or 'comment-added' dispatch, matched in full and
+          # case-sensitively. 'change-merged' stays allowed, though it
+          # can arrive before the mirror replicates the merge;
+          # docs/linting.md says to dispatch only after replication. A
+          # push, pull request or schedule carries no such input and
+          # passes.
+          # BEGIN linting_patchset_guard
+          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ] && {
+            [ "${CALLER_GERRIT_EVENT_TYPE:-}" = 'patchset-created' ] ||
+              [ "${CALLER_GERRIT_EVENT_TYPE:-}" = 'comment-added' ]
+          }; then
+            echo "::error::linting.yaml cannot lint a 'patchset-created'" \
+              "or 'comment-added' Gerrit dispatch: a Gerrit dispatch" \
+              "runs on the branch, so it would lint the branch tip," \
+              "not the change. Call linting-verify.yaml instead."
+            exit 1
+          fi
+          # END linting_patchset_guard
 
           check_path() {
             # $1=value $2=label

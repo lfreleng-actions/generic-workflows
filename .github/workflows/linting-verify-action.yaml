@@ -1,0 +1,61 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# =============================================================================
+# Thin linting verify caller (self-test)
+# =============================================================================
+# This repository consumes its own reusable linting verify workflow, so
+# every pull request raised here runs the wiring shipped to consumers:
+# plan -> Lint, in block mode behind the organisation allow-list,
+# against the fixture in tests/fixtures/linting-verify/.
+#
+# What the run covers, and what it cannot:
+#   * Lint runs the fixture's .pre-commit-config.yaml with
+#     standalone-linting-action, skipping check-json and
+#     linting-verify-self-test-trap through skip_hooks. The trap fails
+#     whenever it runs in this workflow, so the run fails if
+#     skip_hooks stops reaching the hook executor; skipping check-json
+#     alone could not show that, since it passes when it runs. prek
+#     runs a configuration's hooks from the git top level, so
+#     check-yaml reads every YAML file in this repository and
+#     actionlint every workflow here, not the fixture alone. Both pass
+#     here, and the run shows the actionlint hook consumers add works
+#     within the organisation allow-list.
+#   * A pull request cannot dispatch Gerrit mode, so the Gerrit
+#     checkout and the credential removal are covered offline by
+#     tests/test-linting-verify-plan.sh and
+#     tests/test-ci-management-verify-plan.sh instead.
+#
+# The reusable is referenced with the self-repository form ('$/'),
+# which resolves this repository at the commit already running, so the
+# branch's own copy runs. Consumers pin a released SHA instead, as
+# examples/linting-verify/ shows.
+#
+# The '-action' suffix is a local disambiguator: a caller in this
+# repository cannot share a file name with the reusable it calls.
+# =============================================================================
+name: 'Linting Verify (self) 🔍'
+
+# yamllint disable-line rule:truthy
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions: {}
+
+concurrency:
+  group: 'linting-verify-self-${{ github.ref }}'
+  cancel-in-progress: true
+
+jobs:
+  linting-verify:
+    name: 'Linting Verify (self)'
+    permissions:
+      contents: read
+    uses: $/.github/workflows/linting-verify.yaml
+    with:
+      path_prefix: 'tests/fixtures/linting-verify'
+      # The trap fails unless skipped; see the fixture.
+      skip_hooks: 'check-json linting-verify-self-test-trap'
+      harden_runner_egress: 'block'
