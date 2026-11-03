@@ -31,7 +31,9 @@ before the mirror replicates the merge, so `linting.yaml` may lint
 the previous tip; a caller using one must not dispatch until it has
 confirmed replication, as
 [the ancestry check](ci-management-merge.md#the-ancestry-check)
-describes for ci-management merge.
+describes for ci-management merge. `linting.yaml` refuses a
+`patchset-created` or `comment-added` dispatch with an error naming
+this workflow: a recheck arrives on the target branch too.
 
 The workflow is the `Lint` job of
 [`ci-management-verify.yaml`](ci-management-verify.md) without the
@@ -330,15 +332,26 @@ stops following the Gerrit checkout, and when the linting step stops
 passing `skip_hooks`, `path_prefix`, `cache_hooks: 'false'`,
 `node_setup: 'false'` or `rust_toolchain_setup: 'false'` (the last two
 each dropped, changed and duplicated in copies of the workflow, each
-of which it expects to catch). The
-`linting-verify-fixtures` prek hook runs it whenever the workflow,
-the example or the script changes.
+of which it expects to catch). The `linting-verify-fixtures` prek
+hook runs it whenever either workflow, the example or the script
+changes.
 
 The fixtures test the extracted logic. The dispatch checks (event
-type, refspec, change and patchset numbers, and revision) read
-`github.event.inputs` in a called workflow, which no real dispatch
-has exercised; the vote rule runs through a small evaluator of the
-operators it uses, not GitHub's.
+type, refspec, change and patchset numbers, and revision) and the
+`linting.yaml` guard all read `github.event.inputs` in a called
+workflow, which no real dispatch has exercised; the vote rule runs
+through a small evaluator of the operators it uses, not GitHub's.
+
+The same script runs the guard `linting.yaml` uses to refuse a
+per-patchset dispatch, extracted from its plan job: it must refuse a
+`workflow_dispatch` carrying `GERRIT_EVENT_TYPE: patchset-created` or
+`comment-added`, and pass `change-merged`, the near misses
+`comment-added-extra`, `Comment-Added` and `Patchset-Created`, an
+empty or missing value, and a push, pull request or schedule. Each
+refused event type dropped, a prefix match, a case-insensitive match
+and a guard on any event, in a copy of the guard, must fail those
+cases. That tests the extracted logic, not GitHub's handing of the
+caller's event to a called workflow.
 
 `tests/test-ci-management-verify-plan.sh` fails when this workflow's
 `gerrit` script drifts from `change-isolation.yaml`'s, its credential

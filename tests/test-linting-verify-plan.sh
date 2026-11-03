@@ -3,9 +3,12 @@
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 #
 # Fixtures for the Gerrit, plan and harden-runner gate logic in
-# .github/workflows/linting-verify.yaml, and for the vote rule and
+# .github/workflows/linting-verify.yaml, for the vote rule and
 # concurrency group in
-# examples/linting-verify/gerrit-linting-verify.yaml.
+# examples/linting-verify/gerrit-linting-verify.yaml, and for the
+# guard in .github/workflows/linting.yaml that refuses a
+# 'patchset-created' or 'comment-added' Gerrit dispatch and points it
+# here.
 #
 # The plan checks path_prefix and skip_hooks, which reach
 # standalone-linting-action and prek's command line, refuses a
@@ -31,11 +34,14 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 workflow="${repo_root}/.github/workflows/linting-verify.yaml"
+linting="${repo_root}/.github/workflows/linting.yaml"
 
-if [ ! -f "${workflow}" ]; then
-  echo "ERROR: workflow not found: ${workflow}" >&2
-  exit 1
-fi
+for file in "${workflow}" "${linting}"; do
+  if [ ! -f "${file}" ]; then
+    echo "ERROR: workflow not found: ${file}" >&2
+    exit 1
+  fi
+done
 
 workdir="$(mktemp -d)"
 trap 'rm -rf "${workdir}"' EXIT
@@ -78,6 +84,9 @@ extract "${workflow}" linting_verify_revision "${revision_script}" \
 prek_toml_script="${workdir}/prek-toml.sh"
 extract "${workflow}" linting_verify_prek_toml "${prek_toml_script}" \
   'prek.toml'
+guard_script="${workdir}/patchset-guard.sh"
+extract "${linting}" linting_patchset_guard "${guard_script}" \
+  'patchset-created'
 
 passed=0
 failed=0
@@ -1606,6 +1615,144 @@ for group_mutant in "${group_mutants[@]}"; do
     pass
   fi
 done
+
+# --- linting.yaml patchset guard ----------------------------------
+
+# A per-patchset Gerrit dispatch runs on the target branch, so
+# linting.yaml would lint the branch tip, not the change; so does a
+# recheck ('comment-added'). Its plan job's 'Guard trigger and
+# validate inputs' step refuses those two dispatches and nothing else.
+# These run the extracted guard logic; they cannot show that GitHub
+# hands a called workflow the caller's event inputs.
+
+# The guard lives once, in the plan job's step of that name, before
+# the lint job starts, and reads the caller's input through 'env'.
+guard_lines=$(grep -n '# BEGIN linting_patchset_guard$' "${linting}" |
+  cut -d: -f1)
+guard_step=$(grep -n "name: 'Guard trigger and validate inputs'" \
+  "${linting}" | sed -n 1p | cut -d: -f1)
+lint_job=$(grep -n '^  lint:$' "${linting}" | cut -d: -f1)
+if [ "$(printf '%s\n' "${guard_lines}" | grep -c .)" -eq 1 ] &&
+  [ "${guard_lines}" -gt "${guard_step:-0}" ] &&
+  [ "${guard_lines}" -lt "${lint_job:-0}" ]; then
+  pass
+else
+  fail "the patchset guard is not in the plan job's guard step alone" \
+    "guard at ${guard_lines:-none}, step at ${guard_step:-none}, lint job at ${lint_job:-none}"
+fi
+guard_env=$(sed -n "${guard_step:-1},${guard_lines:-1}p" "${linting}" |
+  grep -cxF \
+    "          CALLER_GERRIT_EVENT_TYPE: \${{ github.event.inputs.GERRIT_EVENT_TYPE }}" ||
+  true)
+if [ "${guard_env}" -eq 1 ]; then
+  pass
+else
+  fail "the guard step does not read GERRIT_EVENT_TYPE through 'env'"
+fi
+
+# run_guard <event name> [<GERRIT_EVENT_TYPE>]: sets guard_rc and
+# guard_log. With no second argument the input is absent altogether.
+run_guard() {
+  guard_rc=0
+  if [ "$#" -ge 2 ]; then
+    guard_log=$(env -i PATH="${PATH}" GITHUB_EVENT_NAME="$1" \
+      CALLER_GERRIT_EVENT_TYPE="$2" \
+      bash -euo pipefail "${guard_script}" 2>&1) || guard_rc=$?
+  else
+    guard_log=$(env -i PATH="${PATH}" GITHUB_EVENT_NAME="$1" \
+      bash -euo pipefail "${guard_script}" 2>&1) || guard_rc=$?
+  fi
+}
+
+# expect_guard_pass <label> <event name> [<GERRIT_EVENT_TYPE>]
+expect_guard_pass() {
+  local label="$1"
+  shift
+  run_guard "$@"
+  if [ "${guard_rc}" -eq 0 ] && [ -z "${guard_log}" ]; then
+    pass
+  else
+    fail "guard, ${label}: expected it to pass" "${guard_log}"
+  fi
+}
+
+guard_message="::error::linting.yaml cannot lint a 'patchset-created'"
+guard_message+=" or 'comment-added' Gerrit dispatch: a Gerrit dispatch"
+guard_message+=" runs on the branch, so it would lint the branch tip,"
+guard_message+=" not the change. Call linting-verify.yaml instead."
+
+# expect_guard_refusal <GERRIT_EVENT_TYPE>: a workflow_dispatch
+# carrying it fails with exactly the message, echoing no value.
+expect_guard_refusal() {
+  run_guard workflow_dispatch "$1"
+  if [ "${guard_rc}" -ne 0 ] &&
+    [ "${guard_log}" = "${guard_message}" ]; then
+    pass
+  else
+    fail "guard, $1 dispatch: expected a refusal" "${guard_log}"
+  fi
+}
+
+guard_cases() {
+  expect_guard_refusal patchset-created
+  expect_guard_refusal comment-added
+  expect_guard_pass 'change-merged dispatch' workflow_dispatch \
+    change-merged
+  expect_guard_pass 'dispatch, empty GERRIT_EVENT_TYPE' workflow_dispatch ''
+  expect_guard_pass 'dispatch, no GERRIT_EVENT_TYPE' workflow_dispatch
+  expect_guard_pass 'dispatch, comment-added with a suffix' \
+    workflow_dispatch 'comment-added-extra'
+  expect_guard_pass 'dispatch, comment-added in another case' \
+    workflow_dispatch 'Comment-Added'
+  expect_guard_pass 'dispatch, patchset-created in another case' \
+    workflow_dispatch 'Patchset-Created'
+  expect_guard_pass 'push' push
+  expect_guard_pass 'push, carrying an event type' push comment-added
+  expect_guard_pass 'pull_request' pull_request
+  expect_guard_pass 'schedule' schedule
+}
+guard_cases
+
+# Each refused event type dropped from a copy of the guard, the match
+# loosened to a prefix or made case-insensitive, and the
+# workflow_dispatch condition dropped, must fail the cases above.
+guard_mutant() {
+  case "$1" in
+    no-patchset-created) sed "s/= 'patchset-created' \]/= 'x-patchset-created' ]/" ;;
+    no-comment-added) sed "s/= 'comment-added' \]/= 'x-comment-added' ]/" ;;
+    prefix) sed "s/\[ \"\${CALLER_GERRIT_EVENT_TYPE:-}\" = 'comment-added' \]/[[ \"\${CALLER_GERRIT_EVENT_TYPE:-}\" == comment-added* ]]/" ;;
+    any-case) sed "s/\"\${CALLER_GERRIT_EVENT_TYPE:-}\"/\"\${CALLER_GERRIT_EVENT_TYPE,,}\"/g" ;;
+    any-event) sed "s/\[ \"\$GITHUB_EVENT_NAME\" = 'workflow_dispatch' \]/true/" ;;
+  esac < "${real_guard_script}"
+}
+real_guard_script="${guard_script}"
+for shape in no-patchset-created no-comment-added prefix any-case \
+  any-event; do
+  guard_script="${workdir}/guard-${shape}.sh"
+  guard_mutant "${shape}" > "${guard_script}"
+  if cmp -s "${guard_script}" "${real_guard_script}"; then
+    fail "guard mutant '${shape}' did not change the guard"
+    continue
+  fi
+  # A mutant that does not parse fails every case, proving nothing.
+  if ! bash -n "${guard_script}" 2> /dev/null; then
+    fail "guard mutant '${shape}' is not valid bash"
+    continue
+  fi
+  passed_before="${passed}"
+  failed_before="${failed}"
+  guard_cases 2> /dev/null
+  # The mutant's results stand for one check, which its failures pass.
+  mutant_failed=$((failed - failed_before))
+  passed="${passed_before}"
+  failed="${failed_before}"
+  if [ "${mutant_failed}" -gt 0 ]; then
+    pass
+  else
+    fail "guard mutant '${shape}' passed the fixtures"
+  fi
+done
+guard_script="${real_guard_script}"
 
 # --- Summary --------------------------------------------------------
 
