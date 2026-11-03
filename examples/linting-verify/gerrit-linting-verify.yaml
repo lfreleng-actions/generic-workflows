@@ -70,15 +70,6 @@
 #     pass the URL explicitly as gerrit_url under the
 #     'linting-verify' job's 'with:' (see there), because the
 #     reusable's fallback reads only vars.GERRIT_URL.
-#   * gerrit-change-visible-action v0.0.2 takes a bare host name in
-#     'host' and the SSH port in a separate 'port' input, and rejects
-#     'host:port', which gerrit-review-action accepts. All eight
-#     project Gerrit servers in the shared allow-list use the default
-#     port, 29418, so most callers need nothing. A caller whose
-#     GERRIT_SERVER carries a port splits it for the visibility step
-#     alone, and leaves the gerrit-review-action steps as they are:
-#         host: gerrit.example.org
-#         port: '40086'
 #   * 'visibility', 'prepare' and 'vote' block egress except to the
 #     hosts in the organisation's Gerrit-servers allow-list
 #     (.github/harden-runner/lf-gerrit-servers/gerrit_servers.txt in
@@ -229,7 +220,7 @@ jobs:
       - name: 'Is the change visible to the voting account?'
         id: check
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/gerrit-change-visible-action@fa327eebc2b217aa23a42e3da4096109a009a4ed  # v0.0.2
+        uses: lfreleng-actions/gerrit-change-visible-action@627c838d6bc46945b9410e6b34a59671d68c1db6  # v0.0.3
         with:
           gerrit-change-number: ${{ inputs.GERRIT_CHANGE_NUMBER }}
           host: ${{ vars.GERRIT_SERVER }}
