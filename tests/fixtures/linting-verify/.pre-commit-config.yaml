@@ -1,0 +1,42 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Fixture for .github/workflows/linting-verify-action.yaml: the Lint
+# job runs every pre-commit-stage hook here but those the caller names
+# in skip_hooks. check-yaml and check-json stand in for a project's
+# own hooks. actionlint is the hook docs/linting-verify.md asks a
+# migrating consumer to add, pinned as this repository's
+# .pre-commit-config.yaml pins it, so the self-test shows it runs
+# within the organisation allow-list.
+#
+# linting-verify-self-test-trap fails whenever it runs inside the
+# self-test, which skips it through skip_hooks: if skip_hooks stops
+# reaching the linting action, the self-test fails. In a called
+# workflow GITHUB_WORKFLOW_REF names the caller's workflow, so the
+# trap fires there alone. prek also finds this file as a nested
+# project when it runs from the repository root, locally, in
+# pre-commit.ci or in another workflow; GITHUB_WORKFLOW_REF there is
+# unset or names another workflow, and the trap passes.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # frozen: v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-json
+
+  - repo: https://github.com/Mateusz-Grzelinski/actionlint-py
+    rev: 357f7eec6dec49bf7693dc0dbec30212226d5492  # frozen: v1.7.12.25
+    hooks:
+      - id: actionlint
+
+  - repo: local
+    hooks:
+      - id: linting-verify-self-test-trap
+        name: 'Self-test trap (fails in the self-test unless skipped)'
+        language: system
+        pass_filenames: false
+        always_run: true
+        # yamllint disable-line rule:line-length
+        entry: bash -c 'case "${GITHUB_WORKFLOW_REF:-}" in */linting-verify-action.yaml@*) exit 1 ;; esac'
