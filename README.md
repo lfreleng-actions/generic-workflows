@@ -785,8 +785,10 @@ replication, as
 [the ancestry check](docs/ci-management-merge.md#the-ancestry-check)
 describes for ci-management merge. To lint each patchset before it
 merges, a Gerrit project calls linting verify instead; the linting
-reusable refuses a `patchset-created` or `comment-added` dispatch,
-since a recheck also arrives on the target branch.
+reusable refuses a `patchset-created` or `comment-added` dispatch, and
+one carrying a `GERRIT_PATCHSET_NUMBER` unless its event type is
+`change-merged`, since a recheck and a hybrid caller's dispatch also
+arrive on the target branch.
 
 Change isolation, tox verify, ci-management verify and linting verify
 are the exceptions, because they run per patchset: gerrit_to_platform

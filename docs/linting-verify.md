@@ -32,8 +32,10 @@ the previous tip; a caller using one must not dispatch until it has
 confirmed replication, as
 [the ancestry check](ci-management-merge.md#the-ancestry-check)
 describes for ci-management merge. `linting.yaml` refuses a
-`patchset-created` or `comment-added` dispatch with an error naming
-this workflow: a recheck arrives on the target branch too.
+`patchset-created` or `comment-added` dispatch, and one carrying a
+`GERRIT_PATCHSET_NUMBER` unless its event type is `change-merged`,
+with an error naming this workflow: a recheck, and a hybrid caller's
+dispatch with no event type, arrive on the target branch too.
 
 The workflow is the `Lint` job of
 [`ci-management-verify.yaml`](ci-management-verify.md) without the
@@ -126,15 +128,21 @@ or digit, the rule `linting.yaml` applies: each id reaches prek's
 command line. It also rejects a `harden_runner_egress` other than
 `block` or `audit`, and a supplemental allow-list without a baseline.
 
-It refuses a `patchset-created` or `comment-added` Gerrit dispatch
-that passes no `gerrit_refspec`. gerrit_to_platform dispatches on the
-target branch, rechecks (`comment-added`) included, and an empty
-refspec selects GitHub mode, so the job would lint the branch tip,
-not the change, and could earn the change a vote. The plan reads the
-caller's `GERRIT_EVENT_TYPE` dispatch input, matched in full and
-case-sensitively: in a called workflow `github.event` is the
-caller's event. A `change-merged` dispatch, and any `push`,
-`pull_request` or `schedule` caller, which has no such input, keeps
+It refuses a Gerrit change dispatch that passes no `gerrit_refspec`:
+one whose `GERRIT_EVENT_TYPE` is `patchset-created` or
+`comment-added`, or one that carries a non-empty
+`GERRIT_PATCHSET_NUMBER` unless its event type is `change-merged`.
+The second covers a hybrid caller, which github2gerrit drives with a
+change and patchset but no event type or refspec. gerrit_to_platform
+dispatches on the target branch, rechecks (`comment-added`) included,
+and an empty refspec selects GitHub mode, so the job would lint the
+branch tip, not the change, and could earn the change a vote. The
+plan reads the caller's `GERRIT_EVENT_TYPE` and
+`GERRIT_PATCHSET_NUMBER` dispatch inputs, the event type matched in
+full and case-sensitively: in a called workflow `github.event` is the
+caller's event. A `change-merged` dispatch, with or without a
+patchset number, a dispatch carrying neither input, and any `push`,
+`pull_request` or `schedule` caller, which has no such input, keep
 GitHub mode.
 
 ## Gerrit mode
@@ -278,8 +286,14 @@ offline:
   refused, and with a refspec, a `change-merged` dispatch, the near
   misses `comment-added-extra`, `Comment-Added` and
   `Patchset-Created`, and an empty and a missing event type, all
-  accepted; each refused event type dropped, a prefix match and a
-  case-insensitive match, in a copy of the plan, caught;
+  accepted; a patchset number with no event type, or with any event
+  type but `change-merged`, and no refspec, refused without echoing
+  either number, and with a refspec accepted; `change-merged` with a
+  patchset number, and an empty patchset number and event type,
+  accepted; each refused event type dropped, a prefix match, a
+  case-insensitive match, the patchset clause dropped or made to
+  ignore the number, the `change-merged` exemption dropped and the
+  refspec ignored, in a copy of the plan, caught;
 - the refspec checks: `master`, `refs/heads/master`, other malformed
   refs and a wrong two-digit part refused; a mismatch with the
   dispatch's refspec refused, a match and an empty dispatch value
@@ -345,13 +359,16 @@ through a small evaluator of the operators it uses, not GitHub's.
 The same script runs the guard `linting.yaml` uses to refuse a
 per-patchset dispatch, extracted from its plan job: it must refuse a
 `workflow_dispatch` carrying `GERRIT_EVENT_TYPE: patchset-created` or
-`comment-added`, and pass `change-merged`, the near misses
-`comment-added-extra`, `Comment-Added` and `Patchset-Created`, an
-empty or missing value, and a push, pull request or schedule. Each
-refused event type dropped, a prefix match, a case-insensitive match
-and a guard on any event, in a copy of the guard, must fail those
-cases. That tests the extracted logic, not GitHub's handing of the
-caller's event to a called workflow.
+`comment-added`, or a `GERRIT_PATCHSET_NUMBER` with no event type or
+any but `change-merged`, with a message that echoes no value. It must
+pass `change-merged`, with or without a patchset number, the near
+misses `comment-added-extra`, `Comment-Added` and `Patchset-Created`,
+an empty or missing value, and a push, pull request or schedule. Each
+refused event type dropped, a prefix match, a case-insensitive match,
+a guard on any event, the patchset clause dropped or made to ignore
+the number and the `change-merged` exemption dropped, in a copy of
+the guard, must fail those cases. That tests the extracted logic, not
+GitHub's handing of the caller's event to a called workflow.
 
 `tests/test-ci-management-verify-plan.sh` fails when this workflow's
 `gerrit` script drifts from `change-isolation.yaml`'s, its credential

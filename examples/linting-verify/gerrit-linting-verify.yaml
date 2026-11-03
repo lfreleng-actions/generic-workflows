@@ -16,8 +16,10 @@
 # lfit/releng-reusable-workflows, usually named gerrit-verify.yaml. Do
 # not call linting.yaml from here: a Gerrit dispatch runs on the
 # target branch, so linting.yaml would lint the branch tip, not the
-# change, and refuses a 'patchset-created' or 'comment-added' dispatch
-# for that reason: rechecks arrive on the branch too.
+# change, and refuses a 'patchset-created' or 'comment-added' dispatch,
+# or one carrying a GERRIT_PATCHSET_NUMBER unless its event type is
+# 'change-merged', for that reason: rechecks and hybrid callers'
+# dispatches arrive on the branch too.
 #
 # FILE NAME: gerrit_to_platform discovers a workflow by its path. It
 # dispatches a patchset to a workflow whose path contains 'verify',
