@@ -33,10 +33,13 @@ nothing — silent, and on a mandated check nobody investigates a green
 one. Defaulting to the whole configuration makes the same
 misconfiguration *duplicated work*: visible, costed, and never unsafe.
 
-The workflow supersedes
+For the post-merge `push` model, the workflow supersedes
 `lfit/releng-reusable-workflows/.github/workflows/compose-repo-linting.yaml`,
 which ran the inverse selection (every hook except a `SKIP` list) on a
-Gerrit checkout, and installed actionlint from an unpinned script.
+Gerrit checkout, and installed actionlint from an unpinned script. A
+Gerrit caller that lints each patchset uses
+[`linting-verify.yaml`](linting-verify.md) instead; see
+[Migration from compose-repo-linting](#migration-from-compose-repo-linting).
 
 ## What it does
 
@@ -808,8 +811,30 @@ path, as in the job summary.
 ## Migration from compose-repo-linting
 
 The legacy workflow took nine required `GERRIT_*` inputs and a
-`pre_commit_skips` list, then ran every hook except those. This
-workflow matches that behaviour with no inputs at all:
+`pre_commit_skips` list, then ran every hook except those, against
+the change under review. Which workflow replaces it depends on when
+the caller runs:
+
+- **Per patchset**, a caller gerrit_to_platform dispatches for each
+  new patchset, migrates to
+  [`linting-verify.yaml`](linting-verify.md). gerrit_to_platform
+  dispatches on the target branch, never on the change's refspec, and
+  this workflow checks out the triggering commit with no Gerrit
+  inputs: it would lint the branch tip, which does not contain the
+  change, and could report green having linted the wrong tree.
+- **After merge**, a `push` caller on the GitHub mirror or a
+  `change-merged` dispatch, migrates here. The `push` trigger is the
+  recommended post-merge model: it fires on the replicated commit, so
+  the plain checkout lints the right tree. A `change-merged` dispatch
+  can arrive before the mirror replicates the merge, so this workflow
+  may lint the previous tip; a caller using one must not dispatch
+  until it has confirmed replication, as
+  [the ancestry check](ci-management-merge.md#the-ancestry-check)
+  describes for ci-management merge.
+
+For the post-merge caller, this workflow matches the legacy behaviour
+with no inputs, apart from the `node_setup` and `rust_toolchain_setup`
+defaults described below:
 
 <!-- markdownlint-disable MD013 -->
 
@@ -823,17 +848,46 @@ workflow matches that behaviour with no inputs at all:
 
 <!-- markdownlint-enable MD013 -->
 
-A Gerrit-mirrored project migrates wholesale. A caller that set no
-`pre_commit_skips` needs no `with:` block at all; one that did carries
-the same list across to `skip_hooks`:
+The legacy workflow installed no Node.js dependencies and set up no
+Rust toolchain. Here `node_setup` and `rust_toolchain_setup` default
+to `auto`, so a repository holding a tracked `package.json` and
+lockfile gets a frozen dependency install, and one holding a tracked
+`Cargo.toml` a Rust toolchain, before the hooks run. A caller whose
+repository holds either and wants the legacy behaviour sets both to
+`'false'`:
 
 ```yaml
 with:
-  skip_hooks: 'actionlint'
+  node_setup: 'false'
+  rust_toolchain_setup: 'false'
 ```
 
-The reusable takes no Gerrit checkout inputs, matching the other
-reusables in this repository.
+Otherwise it accepts the preparation, which fails the run when a
+lockfile is stale or a toolchain is unavailable.
+
+A caller whose repository has neither manifest and that set no
+`pre_commit_skips` needs no `with:` block at all. A caller that set
+`pre_commit_skips` carries the same list across to `skip_hooks`, with
+`actionlint` removed once a self-installing hook is in place:
+
+```yaml
+with:
+  skip_hooks: 'hook-id other-hook-id'
+```
+
+The legacy workflow's separate actionlint job ran regardless of
+`pre_commit_skips`, but in `skip_hooks` an `actionlint` entry disables
+the hook. A configuration without an actionlint hook loses the check
+on migration, so add the `actionlint-py` hook where absent. A
+`language: system` actionlint hook needs an `actionlint` executable
+on `PATH`, which neither this workflow nor `linting-verify.yaml`
+installs, so replace it with `actionlint-py` too; see the actionlint
+step in
+[the linting verify migration](linting-verify.md#migration).
+
+The reusable takes no Gerrit checkout inputs by design: a caller
+that needs the change checked out uses `linting-verify.yaml`, which
+does take them.
 
 An earlier revision of this workflow inverted the selection — running
 the `ci.skip` set by default. That was wrong for precisely this
