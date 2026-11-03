@@ -1,0 +1,1012 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Reusable linting verify workflow: lints a Gerrit change per patchset.
+#
+#   [gerrit] -> plan -> Lint
+#
+# 'gerrit' runs in Gerrit mode alone (gerrit_refspec set): it checks
+# the Gerrit inputs and resolves the ref the Lint job checks the
+# change out against, with the same script as the 'gerrit' job in
+# change-isolation.yaml. 'plan' validates the inputs; it checks
+# nothing out. 'Lint' runs every pre-commit-stage hook in the
+# change's own pre-commit configuration, less any named in skip_hooks,
+# through lfreleng-actions/standalone-linting-action; commit-msg hooks
+# such as gitlint do not run, as in the legacy workflow. It is the
+# 'Lint' job of ci-management-verify.yaml without the JJB leg.
+#
+# Replaces compose-repo-linting.yaml in lfit/releng-reusable-workflows.
+# linting.yaml does not: gerrit_to_platform dispatches a caller on
+# the change's target branch, so linting.yaml, which checks out the
+# triggering commit, would lint the branch tip rather than the change.
+# See docs/linting-verify.md.
+#
+# Security posture:
+#   * The reusable casts no vote, sends no notification and holds no
+#     Gerrit SSH key; voting stays in the caller.
+#   * All variable data reaches 'run' blocks through 'env', never
+#     through expression interpolation.
+#   * The Lint job runs the change's own code: the hooks it
+#     configures. No Git credential is persisted when they run: the
+#     GitHub checkout stores none, the Gerrit checkout's stored token
+#     is removed before anything else runs, and the linting action
+#     receives no github_token. The token the checkout receives still
+#     reaches its post-job cleanup; see "Residual exposure" in
+#     docs/linting-verify.md.
+#   * The Lint job neither restores nor saves the hooks' cache, in
+#     either mode: both run code the change's contributors control,
+#     in a cache scope trusted runs may share.
+#   * The Lint job fails before it checks anything out unless
+#     harden-runner's agent is running, with the check linting.yaml
+#     applies: the step can succeed with no agent started.
+#   * A 'patchset-created' or 'comment-added' dispatch without a
+#     gerrit_refspec fails the plan rather than linting the branch
+#     tip in GitHub mode: rechecks arrive on the branch too.
+#   * A gerrit_refspec must be a change ref whose two-digit part
+#     matches its change number, and must equal the GERRIT_REFSPEC
+#     the dispatch carried, when it carried one; after the checkout,
+#     HEAD must equal the dispatch's GERRIT_PATCHSET_REVISION, when
+#     it carried one. A miswired refspec would otherwise lint, and
+#     vote on, some other tree.
+#   * A prek.toml at path_prefix fails the Lint job before any hook
+#     runs: prek prefers it, but the linting action runs the YAML.
+#   * Fails closed: an unsafe input fails the plan, and with it the
+#     Lint job.
+#
+# Egress: every job starts with step-security/harden-runner, in block
+# mode unless harden_runner_egress is 'audit'.
+#   * 'gerrit' and 'plan' talk to GitHub alone, so they allow
+#     'github.com:443' and nothing else, as change-isolation.yaml
+#     does.
+#   * The Lint job fetches hook environments and the tools they
+#     install at run time. It loads the shared organisation allow-list
+#     through harden-runner-block-action, plus any supplemental list
+#     the caller names, as ci-management-verify.yaml does. In Gerrit
+#     mode the endpoint the 'gerrit' job validated goes first in the
+#     loader's extra_endpoints, ahead of the caller's
+#     harden_runner_extra_endpoints, so the loader's DNS check covers
+#     it too and a '#' comment in the caller's value cannot remove it.
+name: '[R] Linting Verify 🔍'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_call:
+    inputs:
+      skip_hooks:
+        description: >-
+          Space or comma separated hook ids to exclude; every other
+          pre-commit-stage hook in the configuration runs. Empty runs
+          every pre-commit-stage hook; commit-msg hooks never run. An
+          id the configuration does not define is ignored, not an
+          error.
+        required: false
+        type: string
+        default: ''
+      path_prefix:
+        description: >-
+          Directory holding .pre-commit-config.yaml, relative to the
+          repository root
+        required: false
+        type: string
+        default: '.'
+
+      # --- Checkout target (defaults to the calling repository) ---
+      repository:
+        description: 'Repository to check out (owner/name); empty = caller'
+        required: false
+        type: string
+        default: ''
+      ref:
+        description: >-
+          Branch, tag or SHA to check out when no Gerrit refspec is
+          set. Empty is the triggering commit for the calling
+          repository alone; for a different repository, that
+          repository's default branch, so a cross-repository caller
+          passes the ref it intends.
+        required: false
+        type: string
+        default: ''
+
+      # --- Gerrit-aware checkout (empty unless dispatched via Gerrit) ---
+      gerrit_refspec:
+        description: 'Gerrit refspec of the change under test'
+        required: false
+        type: string
+        default: ''
+      gerrit_project:
+        description: 'Gerrit project name'
+        required: false
+        type: string
+        default: ''
+      gerrit_branch:
+        description: >-
+          Gerrit branch the change targets: a short name ('master') or
+          a full ref ('refs/meta/config')
+        required: false
+        type: string
+        default: ''
+      gerrit_url:
+        description: 'Gerrit server URL (falls back to the GERRIT_URL variable)'
+        required: false
+        type: string
+        default: ''
+
+      # --- Runner selection and timeout ---
+      runs_on:
+        description: >-
+          Runner label for all jobs. Must name a Linux runner that
+          harden-runner can monitor; GitHub-hosted Ubuntu runners
+          qualify.
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+      timeout_minutes:
+        description: 'Timeout (minutes) for the Lint job'
+        required: false
+        type: number
+        default: 15
+
+      # --- Runner hardening ---
+      harden_runner_egress:
+        description: "Harden-runner egress policy: 'block' or 'audit'"
+        required: false
+        type: string
+        default: 'block'
+      # Loaded by the Lint job.
+      harden_runner_allowlist:
+        description: 'Out-of-band harden-runner allow-list configuration'
+        required: false
+        type: string
+        # yamllint disable-line rule:line-length
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
+      harden_runner_supplemental_allowlist:
+        description: >-
+          Extra harden-runner allow-list merged with
+          harden_runner_allowlist, in the same coordinate grammar.
+          Empty adds nothing
+        required: false
+        type: string
+        default: ''
+      harden_runner_supplemental_unpinned:
+        description: >-
+          Let harden_runner_supplemental_allowlist omit '@ref' and
+          follow its default branch; only a list in the caller's own
+          organisation qualifies
+        required: false
+        type: boolean
+        default: false
+      harden_runner_extra_endpoints:
+        description: >-
+          Extra egress endpoints written inline, host[:port] tokens
+          separated by spaces or newlines, merged into the allow-list
+          for short-lived fixes. Empty adds nothing
+        required: false
+        type: string
+        default: ''
+
+    secrets:
+      token:
+        description: >-
+          Token used to check out 'repository'; defaults to the job's
+          GITHUB_TOKEN. Supply one with read access when the target
+          is private, since GITHUB_TOKEN reaches the caller alone.
+        required: false
+
+permissions: {}
+
+# No concurrency block, deliberately: concurrency belongs to the
+# caller, which knows the change it runs for. See
+# examples/linting-verify/ for the recommended group.
+
+jobs:
+  gerrit:
+    name: 'Gerrit endpoint'
+    # GitHub mode needs no Gerrit ref, so it spends no runner here;
+    # 'plan' accepts the skipped result.
+    if: inputs.gerrit_refspec != ''
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      endpoint: ${{ steps.endpoint.outputs.endpoint }}
+      ref: ${{ steps.endpoint.outputs.ref }}
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          disable-telemetry: ${{ inputs.harden_runner_egress != 'audit' }}
+          allowed-endpoints: >
+            github.com:443
+
+      # Fails Gerrit mode before the Lint job checks anything out. The
+      # script is change-isolation.yaml's, byte for byte;
+      # tests/test-ci-management-verify-plan.sh fails when they drift.
+      - name: 'Resolve Gerrit endpoint'
+        id: endpoint
+        env:
+          GERRIT_PROJECT: ${{ inputs.gerrit_project }}
+          GERRIT_BRANCH: ${{ inputs.gerrit_branch }}
+          # yamllint disable-line rule:line-length
+          GERRIT_URL: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+        run: |
+          # Resolve Gerrit endpoint
+          set -euo pipefail
+          # tests/test-ci-management-verify-plan.sh and
+          # tests/test-linting-verify-plan.sh extract the script between
+          # the BEGIN and END markers. '-I' as in the plan.
+          python3 -I - <<'PYEOF'
+          # BEGIN linting_verify_gerrit
+          import os
+          import re
+          import sys
+          from urllib.parse import urlsplit
+
+          LABEL = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\Z")
+          REQUIRED = (
+              ("gerrit_project", "GERRIT_PROJECT"),
+              ("gerrit_branch", "GERRIT_BRANCH"),
+              ("gerrit_url/GERRIT_URL", "GERRIT_URL"),
+          )
+
+
+          def fail(message):
+              print(f"::error::{message}")
+              sys.exit(1)
+
+
+          def checkout_ref(branch):
+              # gerrit_to_platform passes a short name for a branch
+              # ('master') but the full ref for a change against any
+              # other ref ('refs/meta/config'). The value reaches
+              # 'git fetch' and never an annotation.
+              # C0, DEL and C1, as in has_control(); checked before
+              # isspace(), which covers U+0085 but not U+009B.
+              if any(
+                  ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F
+                  for char in branch
+              ):
+                  fail("gerrit_branch contains a control character")
+              if any(char.isspace() for char in branch):
+                  fail("gerrit_branch contains whitespace")
+              if (
+                  ".." in branch
+                  or "//" in branch
+                  or branch.startswith("-")
+                  or branch.endswith(("/", ".lock"))
+              ):
+                  fail(
+                      "gerrit_branch is not a valid ref name: it contains"
+                      " '..' or '//', starts with '-', or ends with '/'"
+                      " or '.lock'"
+                  )
+              if branch.startswith("refs/"):
+                  return branch
+              return f"refs/heads/{branch}"
+
+
+          def endpoint(url):
+              # The URL never reaches an annotation: it may hold
+              # characters that would end or forge one.
+              if any(ord(char) <= 0x20 or ord(char) >= 0x7F for char in url):
+                  fail(
+                      "The Gerrit URL contains whitespace, a control"
+                      " character or a non-ASCII character"
+                  )
+              parts = urlsplit(url)
+              if parts.scheme != "https":
+                  fail("The Gerrit URL must start with https://")
+              if parts.query or parts.fragment or url.endswith(("?", "#")):
+                  fail("The Gerrit URL must carry no query or fragment")
+              netloc = parts.netloc
+              if "@" in netloc:
+                  fail("The Gerrit URL must carry no user information")
+              host, colon, port = netloc.partition(":")
+              if colon:
+                  if not port.isdigit() or not 0 < int(port) < 65536:
+                      fail("The Gerrit URL names an invalid port")
+                  port = str(int(port))
+              else:
+                  port = "443"
+              host = host.lower()
+              labels = host.split(".")
+              if len(host) > 253 or not all(
+                  LABEL.match(label) for label in labels
+              ):
+                  fail("The Gerrit URL names an invalid hostname")
+              return f"{host}:{port}"
+
+
+          missing = [
+              name for name, variable in REQUIRED
+              if not os.environ.get(variable, "")
+          ]
+          if missing:
+              fail(f"gerrit_refspec is set but missing: {' '.join(missing)}")
+          result = endpoint(os.environ["GERRIT_URL"])
+          ref = checkout_ref(os.environ["GERRIT_BRANCH"])
+          output = os.environ["GITHUB_OUTPUT"]
+          with open(output, "a", encoding="utf-8") as handle:
+              handle.write(f"endpoint={result}\n")
+              handle.write(f"ref={ref}\n")
+          print(f"Gerrit endpoint: {result} ✅")
+          print(f"Gerrit ref: {ref} ✅")
+          # END linting_verify_gerrit
+          PYEOF
+
+  plan:
+    name: 'Plan'
+    needs: gerrit
+    # A job that needs a skipped one is skipped too unless its 'if'
+    # says otherwise. 'gerrit' may be skipped only in GitHub mode.
+    # yamllint disable-line rule:line-length
+    if: ${{ !cancelled() && (needs.gerrit.result == 'success' || (inputs.gerrit_refspec == '' && needs.gerrit.result == 'skipped')) }}
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 5
+    # No checkout: the plan validates inputs alone.
+    permissions: {}
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          disable-telemetry: ${{ inputs.harden_runner_egress != 'audit' }}
+          allowed-endpoints: >
+            github.com:443
+
+      - name: 'Validate inputs'
+        env:
+          INPUT_SKIP_HOOKS: ${{ inputs.skip_hooks }}
+          INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
+          INPUT_HARDEN_RUNNER_EGRESS: ${{ inputs.harden_runner_egress }}
+          INPUT_HARDEN_RUNNER_ALLOWLIST: ${{ inputs.harden_runner_allowlist }}
+          # yamllint disable-line rule:line-length
+          INPUT_HARDEN_RUNNER_SUPPLEMENTAL_ALLOWLIST: ${{ inputs.harden_runner_supplemental_allowlist }}
+          INPUT_GERRIT_REFSPEC: ${{ inputs.gerrit_refspec }}
+          # In a called workflow 'github.event' is the caller's event,
+          # so this is the GERRIT_EVENT_TYPE input gerrit_to_platform
+          # dispatched the caller with; empty for any other event.
+          CALLER_GERRIT_EVENT_TYPE: ${{ github.event.inputs.GERRIT_EVENT_TYPE }}
+          # The refspec the same dispatch carried; empty for any other
+          # event, and for a hybrid caller github2gerrit drives.
+          CALLER_GERRIT_REFSPEC: ${{ github.event.inputs.GERRIT_REFSPEC }}
+          # The change and patchset the same dispatch names, which the
+          # caller votes on; empty as the refspec is.
+          # yamllint disable-line rule:line-length
+          CALLER_GERRIT_CHANGE_NUMBER: ${{ github.event.inputs.GERRIT_CHANGE_NUMBER }}
+          # yamllint disable-line rule:line-length
+          CALLER_GERRIT_PATCHSET_NUMBER: ${{ github.event.inputs.GERRIT_PATCHSET_NUMBER }}
+        run: |
+          # Validate inputs
+          set -euo pipefail
+          # tests/test-linting-verify-plan.sh extracts the script
+          # between the BEGIN and END markers. '-I' keeps the working
+          # directory off sys.path.
+          python3 -I - <<'PYEOF'
+          # BEGIN linting_verify_plan
+          import os
+          import re
+          import sys
+
+          # A hook id as linting.yaml accepts one: ASCII, starting
+          # alphanumeric, so it can never read as an option.
+          HOOK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z", re.ASCII)
+          # A Gerrit change ref: refs/changes/<last two digits of the
+          # change number>/<change number>/<patchset>.
+          CHANGE_REF = re.compile(
+              r"refs/changes/([0-9]{2})/([0-9]+)/([0-9]+)\Z", re.ASCII
+          )
+
+          errors = []
+
+
+          def error(message):
+              # Messages never carry an input value: one could end or
+              # forge a workflow command.
+              errors.append(message)
+              print(f"::error::{message}")
+
+
+          def has_control(text):
+              return any(
+                  ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F
+                  for char in text
+              )
+
+
+          def check_path(name, value):
+              # path_prefix reaches standalone-linting-action, which
+              # changes into it. An absolute path or a '..' segment
+              # could leave the checkout, and a leading '-' would read
+              # as an option.
+              if not value:
+                  error(f"{name} is empty")
+              # C0, DEL and C1, checked before isspace(), which covers
+              # U+0085 but not U+009B.
+              elif has_control(value):
+                  error(f"{name} contains a control character")
+              elif any(char.isspace() for char in value):
+                  error(f"{name} contains whitespace")
+              elif value.startswith("/"):
+                  error(f"{name} must be a relative path")
+              elif value.startswith("-"):
+                  error(f"{name} starts with '-'")
+              elif ".." in value.split("/"):
+                  error(f"{name} contains a '..' segment")
+
+
+          def check_skip_hooks(value):
+              # Each id reaches prek's command line as the value of a
+              # '--skip' option, so validation is the only lock there.
+              # Empty skips nothing.
+              if has_control(value):
+                  error("skip_hooks contains a control character")
+                  return
+              for hook_id in re.split(r"[ ,]+", value):
+                  if hook_id and not HOOK_ID.match(hook_id):
+                      error(
+                          "skip_hooks holds an invalid hook id: ids are"
+                          " ASCII letters, digits, '.', '_' and '-',"
+                          " separated by spaces or commas, and start"
+                          " with a letter or digit"
+                      )
+                      return
+
+
+          def check_policy(environ):
+              egress = environ.get("INPUT_HARDEN_RUNNER_EGRESS", "")
+              if egress not in ("block", "audit"):
+                  error("harden_runner_egress must be 'block' or 'audit'")
+              # harden-runner-block-action merges a supplemental list
+              # into the baseline, so it rejects one with no baseline.
+              if environ.get(
+                  "INPUT_HARDEN_RUNNER_SUPPLEMENTAL_ALLOWLIST", ""
+              ) and not environ.get("INPUT_HARDEN_RUNNER_ALLOWLIST", ""):
+                  error(
+                      "harden_runner_supplemental_allowlist is set but"
+                      " harden_runner_allowlist is empty; a supplemental"
+                      " list extends the baseline"
+                  )
+
+
+          def check_dispatch(environ):
+              # gerrit_to_platform dispatches on the target branch, so
+              # a patchset dispatch with no refspec would select GitHub
+              # mode and lint the branch tip, not the change. A
+              # 'comment-added' dispatch, a recheck say, arrives on the
+              # branch too. Any other event, 'change-merged' included,
+              # keeps GitHub mode. The match is exact and the event
+              # type is never echoed.
+              event = environ.get("CALLER_GERRIT_EVENT_TYPE", "")
+              if event in (
+                  "patchset-created",
+                  "comment-added",
+              ) and not environ.get("INPUT_GERRIT_REFSPEC", ""):
+                  error(
+                      "A 'patchset-created' or 'comment-added' Gerrit"
+                      " dispatch passed no gerrit_refspec, so the Lint"
+                      " job would lint the branch tip, not the change;"
+                      " pass the dispatch's GERRIT_REFSPEC as"
+                      " gerrit_refspec"
+                  )
+
+
+          def check_refspec(environ):
+              # A refspec that names anything but a change ref, a
+              # branch say, checks that ref out and lints its tip
+              # instead of the change, and the vote would follow. Only
+              # a change ref passes, and its two-digit shard must match
+              # its change number. Neither value is ever echoed.
+              refspec = environ.get("INPUT_GERRIT_REFSPEC", "")
+              if not refspec:
+                  return
+              match = CHANGE_REF.match(refspec)
+              if not match:
+                  error(
+                      "gerrit_refspec is not a Gerrit change ref of the"
+                      " form refs/changes/NN/<change>/<patchset>"
+                  )
+                  return
+              shard, change, patchset = match.groups()
+              # The last two digits, zero padded: change 5 sits under 05.
+              if shard != change[-2:].zfill(2):
+                  error(
+                      "gerrit_refspec's two-digit part does not match"
+                      " the last two digits of its change number"
+                  )
+                  return
+              # The caller votes on the dispatch's change and patchset
+              # numbers, so the refspec linted must name the same ones.
+              # Compared as digit strings: '046421' is not '46421'. An
+              # empty dispatch value skips its comparison, for a hybrid
+              # caller.
+              dispatched_change = environ.get(
+                  "CALLER_GERRIT_CHANGE_NUMBER", ""
+              )
+              if dispatched_change and change != dispatched_change:
+                  error(
+                      "gerrit_refspec's change number differs from the"
+                      " GERRIT_CHANGE_NUMBER the Gerrit dispatch carried"
+                  )
+              dispatched_patchset = environ.get(
+                  "CALLER_GERRIT_PATCHSET_NUMBER", ""
+              )
+              if dispatched_patchset and patchset != dispatched_patchset:
+                  error(
+                      "gerrit_refspec's patchset number differs from the"
+                      " GERRIT_PATCHSET_NUMBER the Gerrit dispatch"
+                      " carried"
+                  )
+              # When the dispatch carries the refspec, the caller must
+              # pass that one. An empty gerrit_refspec is left to
+              # check_dispatch: GitHub mode is right for 'change-merged'.
+              dispatched = environ.get("CALLER_GERRIT_REFSPEC", "")
+              if dispatched and refspec != dispatched:
+                  error(
+                      "gerrit_refspec differs from the GERRIT_REFSPEC"
+                      " the Gerrit dispatch carried; pass the dispatch's"
+                      " value"
+                  )
+
+
+          check_skip_hooks(os.environ.get("INPUT_SKIP_HOOKS", ""))
+          check_path("path_prefix", os.environ.get("INPUT_PATH_PREFIX", ""))
+          check_policy(os.environ)
+          check_dispatch(os.environ)
+          check_refspec(os.environ)
+
+          if errors:
+              print(f"Plan failed with {len(errors)} error(s) ❌")
+              sys.exit(1)
+          print("Inputs are valid ✅")
+          # END linting_verify_plan
+          PYEOF
+
+  lint:
+    name: 'Lint'
+    needs: [gerrit, plan]
+    # The default 'if' skips a job when any job earlier in its chain
+    # was skipped, and 'gerrit' is skipped in GitHub mode, so this job
+    # tests the plan's own result instead.
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+          # yamllint disable-line rule:line-length
+          supplemental_config: ${{ inputs.harden_runner_supplemental_allowlist }}
+          # A caller naming a list depends on it, so its absence fails
+          # here rather than at the first blocked connection.
+          # yamllint disable-line rule:line-length
+          supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
+          # yamllint disable-line rule:line-length
+          supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}
+          # The Gerrit endpoint 'gerrit' validated, for the Gerrit
+          # checkout's HTTPS fallback, then the caller's endpoints; the
+          # endpoint is empty in GitHub mode. Merged here so the
+          # loader's DNS check and its invalid_records policy cover it:
+          # an endpoint added to harden-runner's allowed-endpoints
+          # directly skips both, and one unresolvable host there makes
+          # the agent drop the whole policy. The endpoint goes first:
+          # the loader strips a '#' comment to the end of its line, so
+          # a caller's value ending in one would swallow an endpoint
+          # appended after it. The loader splits on whitespace, so an
+          # empty half adds nothing.
+          # yamllint disable-line rule:line-length
+          extra_endpoints: ${{ format('{0} {1}', needs.gerrit.outputs.endpoint, inputs.harden_runner_extra_endpoints) }}
+          allow_list_summary: 'true'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          # The loaded list, Gerrit endpoint included; see
+          # extra_endpoints above.
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      # harden-runner's step succeeds with no agent started when the
+      # agent times out, or when the repository's administrators set
+      # the 'skip-harden-runner' custom property, which the workflow
+      # cannot see. The hooks below would then run the change's own
+      # code with no egress enforcement and report green, so the job
+      # stops here, before anything is checked out, unless the agent
+      # is running.
+      - name: 'Check harden-runner is monitoring'
+        shell: bash
+        env:
+          INPUT_HARDEN_RUNNER_EGRESS: ${{ inputs.harden_runner_egress }}
+        run: |
+          # Check harden-runner is monitoring
+          set -euo pipefail
+          # tests/test-linting-verify-plan.sh extracts the script
+          # between the linting_verify_harden_gate markers and runs it.
+          # tests/test-ci-management-verify-plan.sh fails when the
+          # region between the linting_verify_harden_check markers
+          # drifts from linting.yaml's harden_check.
+          # BEGIN linting_verify_harden_gate
+          # BEGIN linting_verify_harden_check
+          # Decide whether harden-runner is really monitoring this
+          # job.
+          #
+          # The action returns early -- printing to stdout, neither
+          # warning nor failing -- on 'ubuntu-slim', inside a
+          # container, on community-tier ARM64, on a self-hosted
+          # runner with no agent, and when the repository carries the
+          # 'skip-harden-runner' custom property. RUNNER_OS reads
+          # 'Linux' through every one of them, so a platform test
+          # alone reports a hardened job that is nothing of the sort.
+          #
+          # Test for the AGENT instead of enumerating runner shapes.
+          # Enumerating unsupported labels is a blocklist, and a
+          # runner image added next year walks straight past it; the
+          # agent either started or it did not. On Linux the pre-step
+          # polls for the agent's status file, but only for about nine
+          # seconds; harden_runner_await below covers an agent still
+          # starting after that. A custom VM image ships the agent
+          # already running and announces itself by environment
+          # variable.
+          #
+          # The status file is evidence ONLY on an ephemeral runner.
+          # '/home/agent/agent.status' is precisely what
+          # harden-runner's own isAgentInstalled() tests, and its
+          # self-hosted post-step does not remove it, so on a
+          # persistent runner a file left by an earlier job would
+          # read as 'monitored' with nothing running. Worse,
+          # shouldDeployAgentOnSelfHosted() returns FALSE once it
+          # sees that file, so harden-runner itself then declines to
+          # install -- the stale file both causes the gap and hides
+          # it.
+          #
+          # A GitHub-hosted runner is discarded after the job, so the
+          # file can only be there because this job's pre-step wrote
+          # it. RUNNER_ENVIRONMENT is the same signal harden-runner
+          # branches on (isGithubHosted), so the two agree by
+          # construction rather than by coincidence.
+          #
+          # Anything else reports 'unmonitored', which is the honest
+          # answer regardless: in the community tier harden-runner
+          # installs no agent on a self-hosted runner unless
+          # deploy-on-self-hosted-vm is set, so there was no
+          # enforcement to lose. 'audit' warns and continues;
+          # 'block' stops.
+          # harden-runner's pre-step polls for the status file 30
+          # times at 300 ms, then prints 'timed out' and succeeds
+          # whether or not the agent came up. The agent resolves every
+          # allow-list entry before it writes that file, so the
+          # organisation list can outlast the window while the agent
+          # is still starting, and the verdict would then fail a
+          # runner that is about to be monitored. Wait longer, but
+          # only on a GitHub-hosted runner where harden-runner wrote
+          # the agent's configuration, which it does just before
+          # starting it: with no configuration there is no agent
+          # coming, and waiting would only delay the verdict.
+          harden_runner_await() {
+            # $1=agent config file $2=agent status file $3=seconds
+            # $4=RUNNER_ENVIRONMENT
+            local waited=0
+            if [ "$4" != 'github-hosted' ] || [ ! -f "$1" ]; then
+              return 0
+            fi
+            while [ ! -f "$2" ] && [ "$waited" -lt "$3" ]; do
+              sleep 1
+              waited=$((waited + 1))
+            done
+          }
+
+          harden_runner_verdict() {
+            # $1=RUNNER_OS $2=agent status file $3=custom-image flag
+            # $4=RUNNER_ENVIRONMENT
+            if [ "$1" != 'Linux' ]; then
+              printf 'not-linux'
+              return
+            fi
+            if [ "$4" != 'github-hosted' ]; then
+              printf 'unmonitored'
+              return
+            fi
+            if [ "$3" = 'true' ] || [ -f "$2" ]; then
+              printf 'monitored'
+              return
+            fi
+            printf 'unmonitored'
+          }
+
+          # Act on the verdict. 'not-linux' is a caller mistake and
+          # deterministic, so it fails whatever the policy.
+          #
+          # 'unmonitored' splits on the policy the caller asked for,
+          # because the loss differs. Under 'block' the caller asked
+          # for egress enforcement and is not getting it: hooks the
+          # repository controls would reach the network unchecked
+          # while the check still went green, so stop. Under 'audit'
+          # nothing was ever enforced -- audit records traffic and
+          # blocks none of it -- so the loss is telemetry, and
+          # failing every pull request across the estate over a
+          # vendor outage would cost far more than it saved.
+          harden_runner_gate() {
+            # $1=verdict $2=egress policy $3=trusted event
+            case "$1" in
+              not-linux)
+                echo "::error::runs_on must name a Linux runner:" \
+                  "this workflow and harden-runner both require" \
+                  "one (RUNNER_OS=$RUNNER_OS) ❌"
+                return 1
+                ;;
+              unmonitored)
+                if [ "$2" = 'block' ]; then
+                  echo "::error::harden-runner is not monitoring" \
+                    "this runner, so the 'block' egress policy is" \
+                    "not in force ❌"
+                  echo "::error::Repository-defined hooks would" \
+                    "reach the network unchecked while this check" \
+                    "reported green. Use a runner harden-runner" \
+                    "supports (a GitHub-hosted x64 Linux image," \
+                    "not 'ubuntu-slim', not a container job), or" \
+                    "set harden_runner_egress to 'audit'."
+                  return 1
+                fi
+                # Audit mode records rather than blocks, so on a
+                # TRUSTED event an unmonitored runner costs the
+                # recording and nothing else -- the hooks came from
+                # this repository either way.
+                #
+                # An untrusted event is a different proposition. The
+                # hooks are written by whoever opened the pull
+                # request, and without the agent there is no egress
+                # record at all. Withholding the token does not help
+                # here: it protects the token, not the host, and a
+                # persistent self-hosted runner carries whatever
+                # those hooks did into the next job. So this one
+                # fails whatever the policy asked for.
+                # '${3:-false}' so an omitted argument reads as
+                # untrusted. Unset would abort under 'set -u', and
+                # defaulting the other way would let a caller that
+                # forgot to pass it through skip the check entirely.
+                if [ "${3:-false}" != 'true' ]; then
+                  echo "::error::harden-runner is not monitoring" \
+                    "this runner, and this event runs hooks defined" \
+                    "outside the base repository ❌"
+                  echo "::error::Fork-defined hooks would run" \
+                    "unrecorded, and on a self-hosted runner they" \
+                    "outlive the job. Use a runner harden-runner" \
+                    "supports, or do not run this workflow on" \
+                    "untrusted events."
+                  return 1
+                fi
+                echo "::warning::harden-runner is not monitoring" \
+                  "this runner; egress is unrecorded. Audit mode" \
+                  "enforces nothing either way, so the run" \
+                  "continues."
+                ;;
+            esac
+            return 0
+          }
+          # END linting_verify_harden_check
+
+          harden_runner_await /home/agent/agent.json \
+            /home/agent/agent.status 60 "${RUNNER_ENVIRONMENT:-}"
+          # Every hook here is code under review, never the base
+          # repository's alone, so the event is never trusted: an
+          # unmonitored runner fails under 'audit' too.
+          if ! harden_runner_gate \
+            "$(harden_runner_verdict "$RUNNER_OS" \
+              /home/agent/agent.status \
+              "${STEP_SECURITY_HARDEN_RUNNER:-}" \
+              "${RUNNER_ENVIRONMENT:-}")" \
+            "$INPUT_HARDEN_RUNNER_EGRESS" \
+            false; then
+            exit 1
+          fi
+          echo "harden-runner is monitoring this runner ✅"
+          # END linting_verify_harden_gate
+      - name: 'Checkout Gerrit change'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@7c4a868e1f8e82a27948748eeda306d8e8c117db  # v1.3.0
+        with:
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          # The action defaults this to github.repository, which inside
+          # a reusable workflow names the caller rather than the
+          # project under review.
+          repository: ${{ inputs.repository || github.repository }}
+          # A short branch name or a full ref, resolved by 'gerrit'.
+          ref: ${{ needs.gerrit.outputs.ref }}
+          token: ${{ secrets.token || github.token }}
+      # A refspec can pass the plan and still not be the patchset the
+      # dispatch announced. When the dispatch names the revision, the
+      # checked-out commit must be it.
+      - name: 'Verify the checked-out revision'
+        if: inputs.gerrit_refspec != ''
+        shell: bash
+        env:
+          # yamllint disable-line rule:line-length
+          CALLER_GERRIT_PATCHSET_REVISION: ${{ github.event.inputs.GERRIT_PATCHSET_REVISION }}
+        run: |
+          # Verify the checked-out revision
+          set -euo pipefail
+          # tests/test-linting-verify-plan.sh extracts the script
+          # between the BEGIN and END markers and runs it against a
+          # repository it builds.
+          # BEGIN linting_verify_revision
+          # Empty for a caller whose dispatch carries no revision, a
+          # hybrid caller github2gerrit drives say: nothing to compare.
+          expected=${CALLER_GERRIT_PATCHSET_REVISION:-}
+          if [ -z "${expected}" ]; then
+            echo "No dispatched patchset revision to compare; skipped"
+            exit 0
+          fi
+          # The dispatch value is never echoed: it could end or forge
+          # a workflow command.
+          head=$(git rev-parse --verify 'HEAD^{commit}')
+          if [ "${head}" != "${expected}" ]; then
+            echo "::error::The checked-out commit is not the" \
+              "GERRIT_PATCHSET_REVISION the Gerrit dispatch carried," \
+              "so gerrit_refspec does not name this patchset ❌"
+            exit 1
+          fi
+          echo "Checked out the dispatched patchset revision ✅"
+          # END linting_verify_revision
+      # The Gerrit action checks out with persist-credentials: true and
+      # offers no way to turn it off, so the stored token stays readable
+      # until the post-job cleanup. The hooks are the change's own
+      # code, so the stored token is removed before they start. The
+      # token still reaches the post-job cleanup; see "Residual
+      # exposure" in docs/linting-verify.md.
+      - name: 'Remove checkout credentials'
+        if: inputs.gerrit_refspec != ''
+        shell: bash
+        run: |
+          # Remove checkout credentials
+          set -euo pipefail
+          # tests/test-ci-management-verify-plan.sh extracts the
+          # script between the BEGIN and END markers, and fails when
+          # it drifts from ci-management-verify.yaml's.
+          # BEGIN linting_verify_drop_credentials
+          # actions/checkout writes the token to a
+          # git-credentials-*.config file, pulled into a repository's
+          # configuration by includeIf entries: .git/config and, with
+          # submodules, each submodule's config under .git/modules.
+          # Older releases set an extraheader in those files
+          # themselves. Remove both forms from every repository, and
+          # never print a value: it is the token.
+          top=$(git rev-parse --absolute-git-dir)
+          git_dirs=("${top}")
+          if [ -d "${top}/modules" ]; then
+            # A submodule's name may hold '/', so its git directory
+            # can sit at any depth, with nested submodules below it.
+            # Keep each directory holding a config file that git
+            # accepts as a repository.
+            while IFS= read -r -d '' config; do
+              dir=${config%/config}
+              if git --git-dir="${dir}" rev-parse --git-dir \
+                > /dev/null 2>&1; then
+                git_dirs+=("${dir}")
+              fi
+            done < <(find "${top}/modules" -type f -name config -print0)
+          fi
+          for dir in "${git_dirs[@]}"; do
+            while IFS= read -r -d '' entry; do
+              key=${entry%%$'\n'*}
+              value=${entry#*$'\n'}
+              case "${value##*/}" in
+                git-credentials-*.config)
+                  rm -f -- "${value}"
+                  git --git-dir="${dir}" config --local --unset-all \
+                    "${key}" || [ $? -eq 5 ]
+                  ;;
+              esac
+            done < <(git --git-dir="${dir}" config --local -z \
+              --get-regexp '^includeif\..*\.path$' || true)
+            while IFS= read -r -d '' key; do
+              git --git-dir="${dir}" config --local --unset-all \
+                "${key}" || [ $? -eq 5 ]
+            done < <(git --git-dir="${dir}" config --local -z \
+              --name-only --get-regexp '^http\..*\.extraheader$' || true)
+          done
+          # Read each repository's effective configuration, includes
+          # and all, so a form missed above fails the leg instead of
+          # reaching the change's code.
+          for dir in "${git_dirs[@]}"; do
+            if git --git-dir="${dir}" config --get-regexp \
+              '^http\..*\.extraheader$' > /dev/null; then
+              echo "::error::Checkout credentials remain in the git" \
+                "configuration; refusing to run the change's code"
+              exit 1
+            fi
+          done
+          echo "Checkout credentials removed ✅"
+          # END linting_verify_drop_credentials
+      - name: 'Checkout repository'
+        if: inputs.gerrit_refspec == ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+          token: ${{ secrets.token || github.token }}
+      # The linting action passes <path_prefix>/.pre-commit-config.yaml
+      # to prek explicitly, while prek's own discovery ranks prek.toml
+      # above it. A change adding a prek.toml beside the YAML would be
+      # linted against a configuration the repository has superseded,
+      # so refuse it, in both modes, as linting.yaml does.
+      - name: 'Refuse a prek.toml configuration'
+        shell: bash
+        env:
+          INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
+        run: |
+          # Refuse a prek.toml configuration
+          set -euo pipefail
+          # tests/test-linting-verify-plan.sh extracts the script
+          # between the BEGIN and END markers and runs it against
+          # trees it builds.
+          # BEGIN linting_verify_prek_toml
+          # The plan has validated path_prefix; '.' is the root.
+          prefix=${INPUT_PATH_PREFIX:-.}
+          if [ "${prefix}" = '.' ]; then
+            toml='prek.toml'
+          else
+            toml="${prefix}/prek.toml"
+          fi
+          # A symlink counts even when it dangles: prek would still
+          # find the name. No value is echoed.
+          if [ -e "${toml}" ] || [ -L "${toml}" ]; then
+            echo "::error::A prek.toml sits beside the pre-commit" \
+              "configuration. This workflow runs the" \
+              ".pre-commit-config.yaml only, and prek prefers" \
+              "prek.toml, so linting the YAML would run a" \
+              "configuration the repository has superseded. Use" \
+              ".pre-commit-config.yaml alone ❌"
+            exit 1
+          fi
+          echo "No prek.toml configuration found ✅"
+          # END linting_verify_prek_toml
+
+      # The tree is already prepared, so no_checkout keeps the action
+      # from replacing it with the caller's commit. No github_token:
+      # the hooks are the change's own code. skip_hooks combines with
+      # run_all_hooks: every pre-commit-stage hook but those named
+      # runs; with no commit_range, commit-msg hooks do not. Neither
+      # prek's hook environments nor uv's cache are restored or saved,
+      # in either mode. Both run code the repository's contributors
+      # control, not only its maintainers: a Gerrit change, a 'ref'
+      # naming an unmerged branch, or a pull_request_target caller's
+      # contributor SHA. Gerrit mode is dispatched on the default
+      # branch, and a GitHub-mode caller may share that scope too, so
+      # a saved cache would let that code plant what trusted runs
+      # then execute. node_setup and rust_toolchain_setup are off for
+      # the same reason, and to keep the legacy behaviour, which set
+      # up neither: their 'auto' defaults would run a frozen
+      # dependency install from a package.json and lockfile, or
+      # prepare a Rust toolchain with rustfmt and clippy for a
+      # Cargo.toml, that the change controls, and a stale lockfile, a
+      # private dependency or an unavailable toolchain or component
+      # would fail the run before any hook.
+      - name: 'Run linting hooks'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/standalone-linting-action@a00b2febdcb6da5332f77e829dfdc131a91b8fce  # v0.10.1
+        with:
+          no_checkout: 'true'
+          run_all_hooks: 'true'
+          path_prefix: ${{ inputs.path_prefix }}
+          skip_hooks: ${{ inputs.skip_hooks }}
+          cache_hooks: 'false'
+          node_setup: 'false'
+          rust_toolchain_setup: 'false'

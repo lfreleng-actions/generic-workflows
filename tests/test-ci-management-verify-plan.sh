@@ -15,6 +15,10 @@
 # The Gerrit script must match change-isolation.yaml's byte for byte,
 # and each leg's credential removal must match the other leg's and
 # tox-verify.yaml's: this script fails when any of them drift.
+# linting-verify.yaml carries copies of the same Gerrit script and
+# credential removal, held to the same drift check here, and a copy of
+# linting.yaml's harden_check, held to the first of linting.yaml's two
+# copies (tests/test-locate-rules.sh holds those two to each other).
 # Removing or renaming the markers fails this script rather than
 # silently testing nothing.
 #
@@ -27,8 +31,11 @@ repo_root="$(cd "${script_dir}/.." && pwd)"
 workflow="${repo_root}/.github/workflows/ci-management-verify.yaml"
 isolation="${repo_root}/.github/workflows/change-isolation.yaml"
 tox_verify="${repo_root}/.github/workflows/tox-verify.yaml"
+linting_verify="${repo_root}/.github/workflows/linting-verify.yaml"
+linting="${repo_root}/.github/workflows/linting.yaml"
 
-for file in "${workflow}" "${isolation}" "${tox_verify}"; do
+for file in "${workflow}" "${isolation}" "${tox_verify}" \
+  "${linting_verify}" "${linting}"; do
   if [ ! -f "${file}" ]; then
     echo "ERROR: workflow not found: ${file}" >&2
     exit 1
@@ -67,6 +74,8 @@ isolation_gerrit="${workdir}/isolation-gerrit.py"
 lint_credentials="${workdir}/drop-credentials-lint.sh"
 jjb_credentials="${workdir}/drop-credentials-jjb.sh"
 tox_credentials="${workdir}/drop-credentials-tox.sh"
+linting_gerrit="${workdir}/linting-verify-gerrit.py"
+linting_credentials="${workdir}/drop-credentials-linting-verify.sh"
 extract "${workflow}" ci_management_verify_plan "${plan_script}" \
   'def check_path'
 extract "${workflow}" ci_management_verify_gerrit "${gerrit_script}" \
@@ -79,6 +88,29 @@ extract "${workflow}" ci_management_verify_drop_credentials_jjb \
   "${jjb_credentials}" 'git-credentials-'
 extract "${tox_verify}" tox_verify_drop_credentials "${tox_credentials}" \
   'git-credentials-'
+extract "${linting_verify}" linting_verify_gerrit "${linting_gerrit}" \
+  'def checkout_ref'
+extract "${linting_verify}" linting_verify_drop_credentials \
+  "${linting_credentials}" 'git-credentials-'
+linting_verify_harden="${workdir}/harden-check-linting-verify.sh"
+linting_harden="${workdir}/harden-check-linting.sh"
+extract "${linting_verify}" linting_verify_harden_check \
+  "${linting_verify_harden}" 'harden_runner_gate()'
+# linting.yaml's marker carries a note after its name and appears once
+# per job, so take its first region alone.
+awk '
+  /# BEGIN harden_check \(extracted by tests\/test-locate-rules\.sh\)$/ {
+    indent = match($0, /[^ ]/) - 1
+    capture = 1
+    next
+  }
+  /# END harden_check$/ { if (capture) exit }
+  capture { print substr($0, indent + 1) }
+' "${linting}" > "${linting_harden}"
+if ! grep -q 'harden_runner_gate()' "${linting_harden}"; then
+  echo "ERROR: no harden_check region in ${linting}" >&2
+  exit 1
+fi
 
 passed=0
 failed=0
@@ -109,6 +141,12 @@ expect_same "the JJB leg's credential removal differs from the Lint leg's" \
   "${lint_credentials}" "${jjb_credentials}"
 expect_same 'the credential removal differs from tox-verify.yaml' \
   "${tox_credentials}" "${lint_credentials}"
+expect_same "linting-verify.yaml's Gerrit script differs from change-isolation.yaml" \
+  "${isolation_gerrit}" "${linting_gerrit}"
+expect_same "linting-verify.yaml's credential removal differs from the Lint leg's" \
+  "${lint_credentials}" "${linting_credentials}"
+expect_same "linting-verify.yaml's harden-runner check differs from linting.yaml's" \
+  "${linting_harden}" "${linting_verify_harden}"
 
 # Both Python scripts read caller input, so they must run isolated.
 # Match the command line, anchored, rather than any mention in a
