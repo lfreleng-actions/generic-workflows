@@ -68,13 +68,17 @@ The workflow has no `concurrency` block, casts no vote, sends no
 notification and holds no SSH key: the caller owns them. The
 example carries the recommended concurrency group, one per
 patchset: the workflow, the change number (the run ID when that is
-empty) and the patchset number. A recheck can name an older
-patchset, so patchsets must not cancel each other, while a repeat
-dispatch for one patchset still cancels the run in flight. The
-change number is unique within a Gerrit server and is digits, so
-GitHub's case-insensitive group comparison cannot merge two
-changes. A central `.github` repository serving more than one
-Gerrit server must add the server to the key.
+empty) and the patchset number, with `cancel-in-progress: false`.
+A recheck can name an older patchset, so patchsets must not cancel
+each other. A repeat dispatch for one patchset waits for the run in
+flight rather than cancelling it: cancelling a run cannot retract a
+vote it has already sent over SSH, which could then land after the
+new run's `prepare` clear. GitHub keeps one pending run per group
+and replaces a pending one with a newer. The change number is
+unique within a Gerrit server and is digits, so GitHub's
+case-insensitive group comparison cannot merge two changes. A
+central `.github` repository serving more than one Gerrit server
+must add the server to the key.
 
 ## Inputs
 
@@ -324,8 +328,9 @@ offline:
 - the example's `vote` job condition, which must be
   `!cancelled() && needs.visibility.outputs.visible == 'true'` with no
   `always()` in the job, and four mutants of it caught;
-- the example's concurrency group, rendered through the same
-  evaluator and compared case-insensitively: two patchsets, two
+- the example's concurrency group, which must queue rather than
+  cancel in progress, rendered through the same evaluator and
+  compared case-insensitively: two patchsets, two
   changes, cherry-picks to `main` and `Main` and two workflows get
   different groups, a recheck of one patchset the same one whatever
   the project, branch or Change-Id, and an empty or missing change
@@ -450,9 +455,11 @@ vote-type: ${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result,
 ```
 
 The `vote` job runs on `!cancelled()`, not `always()`, so a failed
-job still reaches it and votes failure. A cancelled run casts no
-vote, since the `prepare` job already cleared the previous one, so a
-recheck leaves nothing stale; rerun the whole workflow to vote again.
+job still reaches it and votes failure. A run cancelled by hand or
+by the platform casts no vote, since the `prepare` job already
+cleared the previous one, so it leaves nothing stale; rerun the
+whole workflow to vote again. A recheck of the same patchset queues
+behind the run in flight rather than cancelling it.
 
 Each patchset has its own run, `prepare` clear and vote. A project
 whose Verified label has a
@@ -562,4 +569,6 @@ Behaviour that changes on migration:
   `additional_dependencies`) or stays in a separate job.
 - The concurrency group and the vote stay in the caller. A caller
   keeping a per-change group should take the example's per-patchset
-  one, so a recheck of an older patchset cannot cancel a newer one.
+  one, so a recheck of an older patchset cannot cancel a newer one,
+  and its `cancel-in-progress: false`, so a cancelled run's vote
+  cannot land after its replacement's clear.
