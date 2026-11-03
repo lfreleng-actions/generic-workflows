@@ -140,6 +140,13 @@ anything else runs, the `Remove checkout credentials` step:
 It never prints a value. The step is the one `tox-verify.yaml` runs,
 which now covers submodules too.
 
+When the mirror cannot serve the change, the checkout step now names
+the mirror, its state and who can act, instead of a bare `couldn't
+find remote ref`. The diagnosis never changes the leg's result. The
+`delay: '0s'` it may cite comes from this workflow, which fixes it
+and has no input for it. See
+[When the mirror is the problem](change-isolation.md#when-the-mirror-is-the-problem).
+
 The `Lint` leg passes no `github_token` to
 `standalone-linting-action`: the hooks are the change's own code, and
 a hook that calls the GitHub API runs without a token.

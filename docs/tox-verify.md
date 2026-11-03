@@ -160,6 +160,13 @@ With `gerrit_refspec` set, each leg checks the change out with
 set to `inputs.repository` or the caller. The action's own default
 names the caller, not the project under review.
 
+When the mirror cannot serve the change, the checkout step now names
+the mirror, its state and who can act, instead of a bare `couldn't
+find remote ref`. The diagnosis never changes the leg's result. The
+`delay: '0s'` it may cite comes from this workflow, which fixes it
+and has no input for it. See
+[When the mirror is the problem](change-isolation.md#when-the-mirror-is-the-problem).
+
 The action persists its checkout token in the git configuration and
 has no input to stop it. The pre-build script and tox run the change's
 own code, so a `Remove checkout credentials` step deletes the token

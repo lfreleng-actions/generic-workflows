@@ -726,6 +726,9 @@ dispatches their callers for each change, and each reusable checks
 that change out with
 `checkout-gerrit-change-action` whenever the caller passes
 `gerrit_refspec`, and falls back to a normal checkout otherwise.
+When the GitHub mirror cannot serve the change, that checkout names
+the mirror's state and who can act; see
+[When the mirror is the problem](docs/change-isolation.md#when-the-mirror-is-the-problem).
 
 The ci-management merge reusable takes `gerrit_branch` and
 `merged_revision` but checks out no change: gerrit_to_platform

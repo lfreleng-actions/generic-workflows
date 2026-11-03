@@ -255,6 +255,33 @@ changes (lfit/releng-gerrit_to_platform#116, released in v0.4.0).
 Once the project's Gerrit runs that release, remove the `visibility`
 job and the `needs` and `if:` entries that name it.
 
+## When the mirror is the problem
+
+A Gerrit-dispatched run checks the change out from the project's
+GitHub mirror. git reports a change or branch the mirror lacks as
+`couldn't find remote ref`, whatever the reason. When that checkout
+fails, the `Plan` job's `Checkout Gerrit change` step now ends with a
+diagnosis of the mirror, in one annotation and one line of the job
+summary. It names the mirror's state (not found or not visible,
+archived, empty, branch missing, change ref missing, or cannot tell)
+and who can act, from the caller to LF Releng. The
+[action's README](https://github.com/lfreleng-actions/checkout-gerrit-change-action/blob/7c4a868e1f8e82a27948748eeda306d8e8c117db/README.md#when-the-mirror-is-the-problem)
+holds the full table of states, messages and who acts.
+
+Gerrit does not replicate private change refs, so a mirror never holds
+a private change and no checkout from it can succeed. The
+[`visibility` gate](#private-changes-and-the-visibility-gate) in the
+examples exists for that case.
+
+The diagnosis is informational. It runs after the checkout fails and
+at no other time, never changes the job's result, and says nothing
+about a mirror that looks healthy.
+
+A missing change ref can mean replication lags behind the action's
+`delay`. This workflow passes `delay: '0s'` and offers no input to
+change it, so a message naming a delay of `0s` calls for a retry, and
+for LF Releng if the failure persists, not for a setting.
+
 ## Security notes
 
 - `plan` is the one job that checks the change out, with read access
