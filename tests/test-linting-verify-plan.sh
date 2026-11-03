@@ -3,7 +3,9 @@
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 #
 # Fixtures for the Gerrit, plan and harden-runner gate logic in
-# .github/workflows/linting-verify.yaml.
+# .github/workflows/linting-verify.yaml, and for the vote rule and
+# concurrency group in
+# examples/linting-verify/gerrit-linting-verify.yaml.
 #
 # The plan checks path_prefix and skip_hooks, which reach
 # standalone-linting-action and prek's command line, refuses a
@@ -1171,6 +1173,439 @@ expect_gate 'custom image agent' pass block no no \
 expect_gate 'self-hosted runner, stale status file' fail block yes yes \
   RUNNER_ENVIRONMENT=self-hosted
 expect_gate 'not Linux' fail block yes yes RUNNER_OS=Windows
+
+# --- Example vote -------------------------------------------------
+
+# The example derives its Gerrit vote from the 'needs' results. The
+# vote job runs only when the run was not cancelled, so a run that a
+# recheck superseded cannot overwrite the newer run's vote. A small
+# evaluator for the GitHub expression operators the line uses runs
+# the line itself over every combination of job results and compares
+# it with the rule written out longhand: success only when every
+# result is success, and failure otherwise. It tests the expression's
+# logic, not GitHub's evaluator.
+example="${repo_root}/examples/linting-verify/gerrit-linting-verify.yaml"
+if [ ! -f "${example}" ]; then
+  echo "ERROR: example not found: ${example}" >&2
+  exit 1
+fi
+vote_lines=$(grep -cE '^[[:space:]]*vote-type: \$\{\{' "${example}" ||
+  true)
+vote_expression=$(sed -nE \
+  's/^[[:space:]]*vote-type: \$\{\{ (.*) \}\}$/\1/p' "${example}")
+if [ "${vote_lines}" -eq 1 ] && [ -n "${vote_expression}" ]; then
+  pass
+else
+  fail "expected one 'vote-type' expression in the example" \
+    "$(grep -n 'vote-type:' "${example}")"
+fi
+# The jobs API race: the example reads no conclusion from it, and so
+# needs no 'actions: read'.
+if grep -nE 'workflow-conclusion@|actions: read' "${example}"; then
+  fail 'the example still reads the run conclusion from the jobs API'
+else
+  pass
+fi
+
+# vote_if_ok <file>: the vote job's only 'if' is the !cancelled()
+# condition, and nothing in the job calls always(), which would keep
+# a superseded run voting.
+vote_if_ok() {
+  local job
+  job=$(awk '
+    /^  vote:$/ { inside = 1; next }
+    inside && /^  [a-z]/ { inside = 0 }
+    inside && !/^[[:space:]]*#/
+  ' "$1")
+  [ "$(grep -cE '^    if:' <<< "${job}")" -eq 1 ] &&
+    grep -qxF -- "    if: \${{ !cancelled() && needs.visibility.outputs.visible == 'true' }}" \
+      <<< "${job}" &&
+    ! grep -qF 'always()' <<< "${job}"
+}
+if vote_if_ok "${example}"; then
+  pass
+else
+  fail "the vote job's 'if' is not the !cancelled() condition" \
+    "$(grep -nE '^    if:' "${example}")"
+fi
+vote_if_mutant="${workdir}/gerrit-linting-verify-if-mutant.yaml"
+for shape in always dropped both negation; do
+  case "${shape}" in
+    always) sed 's/^\(    if: \${{ \)!cancelled()/\1always()/' "${example}" ;;
+    dropped) sed 's/^\(    if: \${{ \)!cancelled() && /\1/' "${example}" ;;
+    both) sed 's/^\(    if: \${{ \)!cancelled()/\1always() \&\& !cancelled()/' \
+      "${example}" ;;
+    negation) sed 's/^\(    if: \${{ \)!cancelled()/\1cancelled()/' "${example}" ;;
+  esac > "${vote_if_mutant}"
+  if cmp -s "${vote_if_mutant}" "${example}"; then
+    fail "vote 'if' mutant '${shape}' did not change the example"
+  elif vote_if_ok "${vote_if_mutant}"; then
+    fail "vote 'if' mutant '${shape}' passed the check"
+  else
+    pass
+  fi
+done
+
+# The evaluator, shared by the vote rule and the concurrency group
+# fixtures below.
+expression_lib="${workdir}/expression.py"
+cat > "${expression_lib}" <<'PYEOF'
+import itertools
+import re
+import sys
+
+TOKEN = re.compile(
+    r"\s*(?:(?P<str>'(?:[^']|'')*')|(?P<op>&&|\|\||==|!=|[!().,*])"
+    r"|(?P<name>[A-Za-z_][A-Za-z0-9_-]*))"
+)
+
+
+def tokenize(text):
+    tokens, pos = [], 0
+    while pos < len(text.rstrip()):
+        match = TOKEN.match(text, pos)
+        if not match:
+            raise SyntaxError(f"cannot read {text[pos:]!r}")
+        pos = match.end()
+        kind = match.lastgroup
+        value = match.group(kind)
+        if kind == "str":
+            value = value[1:-1].replace("''", "'")
+        tokens.append((kind, value))
+    return tokens
+
+
+def truthy(value):
+    return value not in (None, False, 0, "")
+
+
+def equal(left, right):
+    if isinstance(left, str) and isinstance(right, str):
+        return left.lower() == right.lower()
+    return left == right
+
+
+def contains(search, item):
+    if isinstance(search, list):
+        return any(equal(element, item) for element in search)
+    return str(item).lower() in str(search).lower()
+
+
+class Parser:
+    def __init__(self, text, context):
+        self.tokens = tokenize(text)
+        self.context = context
+
+    def peek(self):
+        return self.tokens[0] if self.tokens else (None, None)
+
+    def take(self, value=None):
+        token = self.tokens.pop(0)
+        if value is not None and token[1] != value:
+            raise SyntaxError(f"expected {value!r}, got {token[1]!r}")
+        return token
+
+    def parse(self):
+        value = self.disjunction()
+        if self.tokens:
+            raise SyntaxError(f"trailing {self.tokens!r}")
+        return value
+
+    def disjunction(self):
+        value = self.conjunction()
+        while self.peek() == ("op", "||"):
+            self.take()
+            right = self.conjunction()
+            value = value if truthy(value) else right
+        return value
+
+    def conjunction(self):
+        value = self.comparison()
+        while self.peek() == ("op", "&&"):
+            self.take()
+            right = self.comparison()
+            value = right if truthy(value) else value
+        return value
+
+    def comparison(self):
+        value = self.unary()
+        while self.peek() in (("op", "=="), ("op", "!=")):
+            negate = self.take()[1] == "!="
+            result = equal(value, self.unary())
+            value = not result if negate else result
+        return value
+
+    def unary(self):
+        if self.peek() == ("op", "!"):
+            self.take()
+            return not truthy(self.unary())
+        return self.postfix()
+
+    def postfix(self):
+        value = self.primary()
+        while self.peek() == ("op", "."):
+            self.take()
+            kind, name = self.take()
+            if name == "*":
+                value = list(value.values()) if isinstance(
+                    value, dict) else value
+            elif isinstance(value, list):
+                value = [
+                    element.get(name) if isinstance(element, dict)
+                    else None for element in value
+                ]
+            else:
+                value = value.get(name) if isinstance(value, dict) else None
+        return value
+
+    def primary(self):
+        kind, value = self.take()
+        if kind == "str":
+            return value
+        if (kind, value) == ("op", "("):
+            inner = self.disjunction()
+            self.take(")")
+            return inner
+        if kind != "name":
+            raise SyntaxError(f"unexpected {value!r}")
+        if value in ("true", "false"):
+            return value == "true"
+        if value == "null":
+            return None
+        if self.peek() == ("op", "("):
+            self.take()
+            args = [self.disjunction()]
+            while self.peek() == ("op", ","):
+                self.take()
+                args.append(self.disjunction())
+            self.take(")")
+            if value != "contains" or len(args) != 2:
+                raise SyntaxError(f"unsupported function {value}")
+            return contains(*args)
+        return self.context.get(value)
+PYEOF
+
+vote_script="${workdir}/vote.py"
+{
+  cat "${expression_lib}"
+  cat <<'PYEOF'
+
+
+def expected(results):
+    if all(result == "success" for result in results):
+        return "success"
+    return "failure"
+
+
+RESULTS = ("success", "failure", "cancelled", "skipped")
+expression = sys.argv[1]
+failures = 0
+cases = 0
+# One, two and three needs, the last the example's own, then a
+# caller that keeps a fourth job.
+for jobs in (
+    ("linting-verify",),
+    ("prepare", "linting-verify"),
+    ("visibility", "prepare", "linting-verify"),
+    ("visibility", "prepare", "linting-verify", "tox-verify"),
+):
+    for combination in itertools.product(RESULTS, repeat=len(jobs)):
+        needs = {
+            job: {"result": result, "outputs": {}}
+            for job, result in zip(jobs, combination)
+        }
+        vote = Parser(expression, {"needs": needs}).parse()
+        cases += 1
+        if vote != expected(combination):
+            failures += 1
+            print(f"{dict(zip(jobs, combination))}: voted {vote!r},"
+                  f" expected {expected(combination)!r}")
+print(f"{cases} vote cases, {failures} wrong")
+sys.exit(1 if failures else 0)
+PYEOF
+} > "${vote_script}"
+vote_rc=0
+vote_log=$(python3 -I "${vote_script}" "${vote_expression}" 2>&1) ||
+  vote_rc=$?
+if [ "${vote_rc}" -eq 0 ]; then
+  pass
+else
+  fail "the example's vote rule is wrong" "${vote_log}"
+fi
+
+# The evaluator must catch a wrong rule: each mutant of the line, a
+# clause dropped, the outcomes swapped or the old cancelled branch
+# restored, has to fail it.
+mapfile -t vote_mutants < <(python3 -I -c '
+import sys
+rule = sys.argv[1]
+for old, new in (
+    ("!contains(needs.*.result, \x27failure\x27) && ", ""),
+    ("!contains(needs.*.result, \x27cancelled\x27) && ", ""),
+    (" && !contains(needs.*.result, \x27skipped\x27)", ""),
+    ("\x27success\x27 || \x27failure\x27",
+     "\x27failure\x27 || \x27success\x27"),
+):
+    print(rule.replace(old, new, 1))
+print("contains(needs.*.result, \x27cancelled\x27) && \x27cancelled\x27 || " + rule)
+print("contains(needs.*.result, \x27failure\x27) && \x27failure\x27 || \x27success\x27")
+' "${vote_expression}")
+for vote_mutant in "${vote_mutants[@]}"; do
+  if [ "${vote_mutant}" = "${vote_expression}" ]; then
+    fail "vote mutant did not change the rule" "${vote_mutant}"
+  elif python3 -I "${vote_script}" "${vote_mutant}" > /dev/null 2>&1; then
+    fail "the vote evaluator passed a wrong rule" "${vote_mutant}"
+  else
+    pass
+  fi
+done
+
+# --- Example concurrency group ------------------------------------
+
+# The example keys its concurrency group by change and patchset
+# number: a recheck naming an older patchset must not cancel a newer
+# one's run, a repeat dispatch for one patchset must cancel the run in
+# flight, and a dispatch with no change number must fall back to the
+# run ID. GitHub compares group names case-insensitively, so the
+# comparisons here do too. The same evaluator renders the group's
+# expressions; it tests the key's logic, not GitHub's evaluator.
+group_lines=$(grep -cE '^  group: ' "${example}" || true)
+group_template=$(sed -nE 's/^  group: (.*)$/\1/p' "${example}")
+if [ "${group_lines}" -eq 1 ] && [ -n "${group_template}" ] &&
+  grep -qxF '  cancel-in-progress: true' "${example}"; then
+  pass
+else
+  fail "expected one concurrency group, cancelling in progress" \
+    "$(grep -nE '^  (group|cancel-in-progress):' "${example}")"
+fi
+
+group_script="${workdir}/group.py"
+{
+  cat "${expression_lib}"
+  cat <<'PYEOF'
+
+
+def render(template, context):
+    def value(match):
+        result = Parser(match.group(1), context).parse()
+        if result is None:
+            return ""
+        if isinstance(result, bool):
+            return "true" if result else "false"
+        return str(result)
+
+    return re.sub(r"\$\{\{(.*?)\}\}", value, template)
+
+
+def group(template, run_id="100", workflow="Gerrit Linting Verify",
+          **inputs):
+    base = {
+        "GERRIT_CHANGE_NUMBER": "46421",
+        "GERRIT_PATCHSET_NUMBER": "1",
+        "GERRIT_PROJECT": "releng/builder",
+        "GERRIT_BRANCH": "main",
+        "GERRIT_CHANGE_ID": "I0123456789abcdef0123456789abcdef01234567",
+    }
+    base.update(inputs)
+    base = {key: val for key, val in base.items() if val is not None}
+    context = {
+        "github": {"workflow": workflow, "run_id": run_id},
+        "inputs": base,
+    }
+    return render(template, context)
+
+
+def same(left, right):
+    return left.lower() == right.lower()
+
+
+template = sys.argv[1]
+failures = []
+
+
+def check(name, condition):
+    if not condition:
+        failures.append(name)
+
+
+check("two patchsets of one change share a group",
+      not same(group(template, GERRIT_PATCHSET_NUMBER="1"),
+               group(template, run_id="101", GERRIT_PATCHSET_NUMBER="2")))
+check("a recheck of one patchset gets another group",
+      same(group(template), group(template, run_id="101")))
+check("two changes share a group",
+      not same(group(template),
+               group(template, run_id="101", GERRIT_CHANGE_NUMBER="46422")))
+check("cherry-picks to 'main' and 'Main' share a group",
+      not same(group(template),
+               group(template, run_id="101", GERRIT_CHANGE_NUMBER="46430",
+                     GERRIT_BRANCH="Main")))
+check("change 1 patchset 23 shares a group with change 12 patchset 3",
+      not same(group(template, GERRIT_CHANGE_NUMBER="1",
+                     GERRIT_PATCHSET_NUMBER="23"),
+               group(template, run_id="101", GERRIT_CHANGE_NUMBER="12",
+                     GERRIT_PATCHSET_NUMBER="3")))
+check("the group depends on the project, branch or Change-Id",
+      same(group(template),
+           group(template, run_id="101", GERRIT_PROJECT="other/project",
+                 GERRIT_BRANCH="stable",
+                 GERRIT_CHANGE_ID="Ifedcba9876543210fedcba9876543210fedcba98")))
+check("two workflows share a group",
+      not same(group(template),
+               group(template, run_id="101", workflow="Other Verify")))
+for empty in ("", None):
+    first = group(template, GERRIT_CHANGE_NUMBER=empty)
+    second = group(template, run_id="101", GERRIT_CHANGE_NUMBER=empty)
+    check(f"an empty change number ({empty!r}) does not fall back to the"
+          " run ID", "100" in first and "101" in second
+          and not same(first, second))
+for failure in failures:
+    print(failure)
+print(f"{len(failures)} concurrency group checks failed")
+sys.exit(1 if failures else 0)
+PYEOF
+} > "${group_script}"
+group_rc=0
+group_log=$(python3 -I "${group_script}" "${group_template}" 2>&1) ||
+  group_rc=$?
+if [ "${group_rc}" -eq 0 ]; then
+  pass
+else
+  fail "the example's concurrency group is wrong" "${group_log}"
+fi
+
+# Each mutant of the key, the patchset or the run ID fallback dropped,
+# the old Change-Id or project and branch key restored, the run ID in
+# place of the patchset, the workflow or a separator dropped, has to
+# fail it.
+group_mutate="${workdir}/group-mutants.py"
+cat > "${group_mutate}" <<'PYEOF'
+import sys
+group = sys.argv[1]
+for old, new in (
+    ("-${{ inputs.GERRIT_PATCHSET_NUMBER }}", ""),
+    ("${{ inputs.GERRIT_PATCHSET_NUMBER }}", "${{ github.run_id }}"),
+    (" || github.run_id", ""),
+    ("inputs.GERRIT_CHANGE_NUMBER", "inputs.GERRIT_CHANGE_ID"),
+    ("${{ github.workflow }}-", ""),
+    ("${{ github.workflow }}-",
+     "${{ github.workflow }}-${{ inputs.GERRIT_PROJECT }}-"
+     "${{ inputs.GERRIT_BRANCH }}-"),
+    ("}}-${{ inputs.GERRIT_PATCHSET_NUMBER",
+     "}}${{ inputs.GERRIT_PATCHSET_NUMBER"),
+):
+    print(group.replace(old, new, 1))
+PYEOF
+mapfile -t group_mutants < <(python3 -I "${group_mutate}" "${group_template}")
+for group_mutant in "${group_mutants[@]}"; do
+  if [ "${group_mutant}" = "${group_template}" ]; then
+    fail "group mutant did not change the key" "${group_mutant}"
+  elif python3 -I "${group_script}" "${group_mutant}" > /dev/null 2>&1; then
+    fail "the group check passed a wrong key" "${group_mutant}"
+  else
+    pass
+  fi
+done
 
 # --- Summary --------------------------------------------------------
 

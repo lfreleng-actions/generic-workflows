@@ -287,10 +287,10 @@ repos:
         files: '^(\.github/workflows/(ci-management-verify|linting(-verify)?|tox-verify|change-isolation)\.yaml|tests/test-ci-management-verify-plan\.sh)$'
 
   # Fixtures for the linting verify Gerrit, plan and harden-runner
-  # scripts. The test extracts them from the workflow, so it runs
-  # whenever the workflow or the fixtures change. 'language: system'
-  # with an explicit bash, as for the ci-management verify fixtures
-  # above.
+  # scripts, and for the example caller's vote rule. The test extracts
+  # them from the workflow and the example, so it runs whenever either
+  # or the fixtures change. 'language: system' with an explicit bash,
+  # as for the ci-management verify fixtures above.
   - repo: local
     hooks:
       - id: linting-verify-fixtures
@@ -299,7 +299,7 @@ repos:
         language: system
         pass_filenames: false
         # yamllint disable-line rule:line-length
-        files: '^(\.github/workflows/linting-verify\.yaml|tests/test-linting-verify-plan\.sh)$'
+        files: '^(\.github/workflows/linting-verify\.yaml|examples/linting-verify/gerrit-linting-verify\.yaml|tests/test-linting-verify-plan\.sh)$'
 
   # Fixtures for the ci-management merge plan and merged-revision
   # wait. The test extracts both from the workflow, so it runs

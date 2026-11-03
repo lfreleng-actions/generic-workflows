@@ -1,0 +1,354 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# =============================================================================
+# EXAMPLE: Gerrit linting verify caller
+# =============================================================================
+# gerrit_to_platform dispatches this workflow when a patchset arrives in
+# a project's Gerrit. It checks that the voting account can read the
+# change, clears the previous vote, runs the reusable linting verify
+# workflow (a 'Lint' job running the change's pre-commit hooks against
+# the change itself), and votes Verified on the change from the
+# results of the jobs the vote needs.
+#
+# It replaces a caller of compose-repo-linting.yaml in
+# lfit/releng-reusable-workflows, usually named gerrit-verify.yaml. Do
+# not call linting.yaml from here: a Gerrit dispatch runs on the
+# target branch, so linting.yaml would lint the branch tip, not the
+# change, and refuses a 'patchset-created' or 'comment-added' dispatch
+# for that reason: rechecks arrive on the branch too.
+#
+# FILE NAME: gerrit_to_platform discovers a workflow by its path. It
+# dispatches a patchset to a workflow whose path contains 'verify',
+# and only to one whose path contains 'gerrit'. A copy MUST keep both
+# 'gerrit' and 'verify' in its name, as this file's name does, and
+# MUST NOT contain 'required': gerrit_to_platform keeps such names for
+# the required workflows it dispatches from an organisation's '.github'
+# repository, and does not dispatch them from the project. Keeping the
+# existing gerrit-verify.yaml name also qualifies.
+#
+# DEPLOYMENT NOTES:
+#   * Do not copy this file over an existing caller that runs other
+#     verification jobs: that deletes them, and the vote stays green
+#     without them. A lint-only caller may adopt this job graph whole.
+#     A caller with other jobs (a tox, maven or docs verify, say)
+#     replaces only its compose-repo-linting job with the
+#     'linting-verify' job below, keeps every other job, and keeps
+#     each in the 'vote' job's needs; the vote rule below covers every
+#     job in needs. In the replaced job, keep the existing job ID (the
+#     'vote' job's needs and any 'if:' name it), its needs and its
+#     conditions, and where its Gerrit values come from. A caller
+#     that derives them from a job such as call-gerrit-change-info
+#     (opendaylight/docs and opendaylight/gnmi, measured on
+#     2026-11-03) passes needs.<that job>.outputs.GERRIT_* as
+#     gerrit_refspec, gerrit_project and gerrit_branch, not the
+#     inputs.GERRIT_* below, and keeps that job in the job's needs:
+#     an empty dispatch input there would select GitHub mode and lint
+#     the branch tip. See docs/linting-verify.md in generic-workflows.
+#   * In the project's .github/workflows/, TARGET_REPO stays empty and
+#     the caller's own repository is checked out.
+#   * The project's .pre-commit-config.yaml holds the hooks the 'Lint'
+#     job runs: every pre-commit-stage hook not in skip_hooks; no
+#     commit-msg hook (gitlint, say) runs, as in the legacy workflow.
+#     The legacy separate actionlint job is gone, and this workflow
+#     installs no actionlint executable: add the self-installing
+#     actionlint-py hook, replacing a 'language: system' one
+#     (rhysd/actionlint v1.6.24, or actionlint-system), or set runs_on
+#     to an image that provides the executable; a step here cannot.
+#     See docs/linting-verify.md in generic-workflows.
+#   * Set the repository or organisation variables GERRIT_SERVER,
+#     GERRIT_SSH_USER, GERRIT_KNOWN_HOSTS and GERRIT_URL, and the
+#     secret GERRIT_SSH_PRIVKEY: the names most existing
+#     gerrit-verify.yaml callers already use. The 'visibility',
+#     'prepare' and 'vote' jobs read the first three and the secret to
+#     reach Gerrit over SSH as the voting account; the reusable reads
+#     GERRIT_URL alone. The lfit repositories keep theirs under
+#     LFIT_GERRIT_* names: substitute those throughout, and also
+#     pass the URL explicitly as gerrit_url under the
+#     'linting-verify' job's 'with:' (see there), because the
+#     reusable's fallback reads only vars.GERRIT_URL.
+#   * gerrit-change-visible-action v0.0.2 takes a bare host name in
+#     'host' and the SSH port in a separate 'port' input, and rejects
+#     'host:port', which gerrit-review-action accepts. All eight
+#     project Gerrit servers in the shared allow-list use the default
+#     port, 29418, so most callers need nothing. A caller whose
+#     GERRIT_SERVER carries a port splits it for the visibility step
+#     alone, and leaves the gerrit-review-action steps as they are:
+#         host: gerrit.example.org
+#         port: '40086'
+#   * 'visibility', 'prepare' and 'vote' block egress except to the
+#     hosts in the organisation's Gerrit-servers allow-list
+#     (.github/harden-runner/lf-gerrit-servers/gerrit_servers.txt in
+#     lfreleng-actions/.github). A project Gerrit missing from that
+#     list is blocked; add it there.
+#   * The 'Lint' job blocks egress except to the organisation
+#     allow-list, which carries GitHub, PyPI and npm. A host the hooks
+#     need that is missing from it needs
+#     harden_runner_supplemental_allowlist.
+#
+# Jobs, in order:
+#   visibility       can the voting account read the change?
+#   prepare          clear the previous vote
+#   linting-verify   the reusable workflow
+#   vote             vote Verified from the results of its needs
+#
+# gerrit_to_platform dispatches private changes too, which the voting
+# account cannot read, and GitHub holds no copy of their refs. The
+# 'visibility' job gates every later job:
+#   * Readable change: succeeds with visible=true; the later jobs run
+#     as before.
+#   * Private (unreadable) change: succeeds with visible=false; the
+#     later jobs are skipped, so no vote and no failure email. Making
+#     the change public dispatches a fresh run, which verifies it.
+#   * Gerrit unreachable, a refused credential or an unreadable
+#     answer: fails with no output; the later jobs are skipped and the
+#     failed 'visibility' job is the signal.
+# The gate stays until the project's Gerrit runs the gerrit_to_platform
+# dispatcher fix (v0.4.0), and can then be removed.
+#
+# Voting lives here rather than in the reusable workflow, so the
+# reusable never receives the Gerrit SSH key. To report without voting,
+# as the legacy 'comment-only' input did, add comment-only: 'true' to
+# both gerrit-review-action steps. The votes name the change and
+# patchset from the same dispatch inputs the reusable receives, and the
+# reusable refuses a gerrit_refspec that disagrees with them, so the
+# lint and the vote name one patchset.
+#
+# The vote is derived from the 'needs' results, unlike the other
+# voting examples here, which read the run's conclusion through
+# im-open/workflow-conclusion. That action reads the jobs API, which
+# can still list finished jobs as running; it then reports 'skipped',
+# a vote type gerrit-review-action rejects, and the change gets no
+# final vote. The gerrit-verify.yaml caller in onap/.github records
+# the incident above its own vote: https://github.com/onap/.github
+# =============================================================================
+name: 'Gerrit Linting Verify'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_dispatch:
+    inputs:
+      GERRIT_BRANCH:
+        description: 'Branch that change is against'
+        required: true
+        type: string
+      GERRIT_CHANGE_ID:
+        description: 'The ID for the change'
+        required: true
+        type: string
+      GERRIT_CHANGE_NUMBER:
+        description: 'The Gerrit number'
+        required: true
+        type: string
+      GERRIT_CHANGE_URL:
+        description: 'URL to the change'
+        required: true
+        type: string
+      GERRIT_EVENT_TYPE:
+        description: 'Type of Gerrit event'
+        required: true
+        type: string
+      GERRIT_PATCHSET_NUMBER:
+        description: 'The patch number for the change'
+        required: true
+        type: string
+      GERRIT_PATCHSET_REVISION:
+        description: 'The revision sha'
+        required: true
+        type: string
+      GERRIT_PROJECT:
+        description: 'Project in Gerrit'
+        required: true
+        type: string
+      GERRIT_REFSPEC:
+        description: 'Gerrit refspec of change'
+        required: true
+        type: string
+      TARGET_REPO:
+        description: 'GitHub repository under review (owner/name)'
+        required: false
+        type: string
+        default: ''
+
+concurrency:
+  # One group per patchset: a repeat dispatch for the same patchset
+  # cancels the run in flight, but patchsets never cancel each other,
+  # because a recheck can name an older patchset and would otherwise
+  # cancel the newer one's verification. The 'prepare' clear and the
+  # vote are per patchset anyway. The change number is unique within a
+  # Gerrit server and is digits, so GitHub's case-insensitive group
+  # comparison cannot merge two changes, as it could a Change-Id on
+  # branches 'main' and 'Main'. It identifies the change, so the group
+  # needs no project or branch. A central '.github' repository serving
+  # more than one Gerrit server must add the server to the key. A
+  # dispatch with no change number falls back to the run ID, so it
+  # never shares a group.
+  # yamllint disable-line rule:line-length
+  group: linting-verify-${{ github.workflow }}-${{ inputs.GERRIT_CHANGE_NUMBER || github.run_id }}-${{ inputs.GERRIT_PATCHSET_NUMBER }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  # Remove this job, and the 'visibility' needs and conditions below,
+  # once the project's Gerrit runs a gerrit_to_platform release with
+  # the dispatcher fix (lfit/releng-gerrit_to_platform#116, v0.4.0),
+  # which stops dispatching private changes.
+  visibility:
+    name: 'Change visibility'
+    runs-on: ubuntu-latest
+    # The check travels to Gerrit over SSH, so GITHUB_TOKEN needs no
+    # scopes.
+    permissions: {}
+    timeout-minutes: 5
+    outputs:
+      visible: ${{ steps.check.outputs.visible }}
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
+        with:
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lf-gerrit-servers/gerrit_servers.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: block
+          disable-telemetry: true
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      # The default 'ssh' mode asks as the voting account: what matters
+      # is whether that account can read the change, not anonymous
+      # users. A refused credential, an unreachable server or an
+      # unreadable answer fails this step rather than reporting
+      # 'false'.
+      - name: 'Is the change visible to the voting account?'
+        id: check
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/gerrit-change-visible-action@fa327eebc2b217aa23a42e3da4096109a009a4ed  # v0.0.2
+        with:
+          gerrit-change-number: ${{ inputs.GERRIT_CHANGE_NUMBER }}
+          host: ${{ vars.GERRIT_SERVER }}
+          username: ${{ vars.GERRIT_SSH_USER }}
+          key: ${{ secrets.GERRIT_SSH_PRIVKEY }}
+          known_hosts: ${{ vars.GERRIT_KNOWN_HOSTS }}
+
+  prepare:
+    name: 'Clear vote'
+    needs: visibility
+    if: needs.visibility.outputs.visible == 'true'
+    runs-on: ubuntu-latest
+    # Votes travel to Gerrit over SSH, so GITHUB_TOKEN needs no scopes.
+    permissions: {}
+    timeout-minutes: 5
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
+        with:
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lf-gerrit-servers/gerrit_servers.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: block
+          disable-telemetry: true
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      - name: 'Clear votes'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/gerrit-review-action@264fe205361cbb2ee8f26280998a75680ee33b53  # v1.3.0
+        with:
+          host: ${{ vars.GERRIT_SERVER }}
+          username: ${{ vars.GERRIT_SSH_USER }}
+          key: ${{ secrets.GERRIT_SSH_PRIVKEY }}
+          known_hosts: ${{ vars.GERRIT_KNOWN_HOSTS }}
+          gerrit-change-number: ${{ inputs.GERRIT_CHANGE_NUMBER }}
+          gerrit-patchset-number: ${{ inputs.GERRIT_PATCHSET_NUMBER }}
+          vote-type: clear
+      - name: 'Allow replication'
+        run: sleep 10s
+
+  linting-verify:
+    name: 'Linting Verify'
+    needs: [visibility, prepare]
+    if: needs.visibility.outputs.visible == 'true'
+    permissions:
+      contents: read
+    # REPLACE the pinned SHA below with a generic-workflows release SHA.
+    # The all-zero SHA is a non-functional placeholder, NOT a real commit.
+    # yamllint disable-line rule:line-length
+    uses: lfreleng-actions/generic-workflows/.github/workflows/linting-verify.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
+    with:
+      repository: ${{ inputs.TARGET_REPO }}
+      gerrit_refspec: ${{ inputs.GERRIT_REFSPEC }}
+      gerrit_project: ${{ inputs.GERRIT_PROJECT }}
+      gerrit_branch: ${{ inputs.GERRIT_BRANCH }}
+      # gerrit_url falls back to the GERRIT_URL repository variable.
+      # The lfit repositories, which keep their URL under an
+      # LFIT_GERRIT_* name, pass it explicitly (the variable name
+      # their repository uses), because that fallback reads only
+      # vars.GERRIT_URL:
+      # gerrit_url: ${{ vars.LFIT_GERRIT_URL }}
+      # path_prefix ('.') suits the usual layout. Every pre-commit-stage
+      # hook runs; to skip some, as the legacy pre_commit_skips did,
+      # name them, but remove 'actionlint' from a carried-over list,
+      # also after adding the hook: the legacy workflow's separate
+      # actionlint job ran regardless of that list, but here the entry
+      # disables the hook.
+      # skip_hooks: 'hook-id other-hook-id'
+
+  vote:
+    name: 'Set vote'
+    # !cancelled(), not always(): a failed 'prepare' or
+    # 'linting-verify' still reaches the vote and votes failure, but a
+    # run that a recheck of the same patchset cancelled casts no vote,
+    # so it cannot overwrite the newer run's; the 'prepare' job's clear
+    # stands. The visibility test still skips the vote when the change
+    # is unreadable or the check itself failed.
+    if: ${{ !cancelled() && needs.visibility.outputs.visible == 'true' }}
+    # Every job the caller keeps belongs here: the vote reads the
+    # results of these jobs alone.
+    needs: [visibility, prepare, linting-verify]
+    runs-on: ubuntu-latest
+    # Votes travel to Gerrit over SSH, so GITHUB_TOKEN needs no scopes.
+    permissions: {}
+    timeout-minutes: 5
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
+        with:
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lf-gerrit-servers/gerrit_servers.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: block
+          disable-telemetry: true
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      - name: 'Set vote'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/gerrit-review-action@264fe205361cbb2ee8f26280998a75680ee33b53  # v1.3.0
+        with:
+          host: ${{ vars.GERRIT_SERVER }}
+          username: ${{ vars.GERRIT_SSH_USER }}
+          key: ${{ secrets.GERRIT_SSH_PRIVKEY }}
+          known_hosts: ${{ vars.GERRIT_KNOWN_HOSTS }}
+          gerrit-change-number: ${{ inputs.GERRIT_CHANGE_NUMBER }}
+          gerrit-patchset-number: ${{ inputs.GERRIT_PATCHSET_NUMBER }}
+          # The job runs only when the run was not cancelled, so only
+          # 'success' in every job in needs votes success, and anything
+          # else votes failure: a job that did not run, 'skipped', never
+          # earns a positive vote. A cancelled run casts no vote, since
+          # the 'prepare' job already cleared the previous one, so a
+          # recheck leaves nothing stale; rerun the whole workflow to
+          # vote again.
+          # tests/test-linting-verify-plan.sh evaluates this line.
+          # yamllint disable-line rule:line-length
+          vote-type: ${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && !contains(needs.*.result, 'skipped') && 'success' || 'failure' }}
