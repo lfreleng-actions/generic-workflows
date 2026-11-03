@@ -144,7 +144,7 @@ jobs:
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
         with:
           # yamllint disable-line rule:line-length
           config: 'lfreleng-actions//.github/harden-runner/lf-gerrit-servers/gerrit_servers.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'
@@ -182,7 +182,7 @@ jobs:
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
         with:
           # yamllint disable-line rule:line-length
           config: 'lfreleng-actions//.github/harden-runner/lf-gerrit-servers/gerrit_servers.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'
@@ -196,7 +196,7 @@ jobs:
             ${{ env.CONNECTION_ALLOW_LIST }}
       - name: 'Comment that the run started'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/gerrit-review-action@d56b0b5c81402f8cb435aaca513bebdea3be951e  # v1.2.0
+        uses: lfreleng-actions/gerrit-review-action@264fe205361cbb2ee8f26280998a75680ee33b53  # v1.3.0
         with:
           host: ${{ vars.GERRIT_SERVER }}
           username: ${{ vars.GERRIT_SSH_USER }}
@@ -246,7 +246,7 @@ jobs:
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
         with:
           # yamllint disable-line rule:line-length
           config: 'lfreleng-actions//.github/harden-runner/lf-gerrit-servers/gerrit_servers.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'
@@ -260,7 +260,7 @@ jobs:
             ${{ env.CONNECTION_ALLOW_LIST }}
       - name: 'Comment the result'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/gerrit-review-action@d56b0b5c81402f8cb435aaca513bebdea3be951e  # v1.2.0
+        uses: lfreleng-actions/gerrit-review-action@264fe205361cbb2ee8f26280998a75680ee33b53  # v1.3.0
         with:
           host: ${{ vars.GERRIT_SERVER }}
           username: ${{ vars.GERRIT_SSH_USER }}
