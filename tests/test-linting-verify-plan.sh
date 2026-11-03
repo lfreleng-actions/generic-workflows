@@ -1513,18 +1513,20 @@ done
 
 # The example keys its concurrency group by change and patchset
 # number: a recheck naming an older patchset must not cancel a newer
-# one's run, a repeat dispatch for one patchset must cancel the run in
-# flight, and a dispatch with no change number must fall back to the
-# run ID. GitHub compares group names case-insensitively, so the
-# comparisons here do too. The same evaluator renders the group's
-# expressions; it tests the key's logic, not GitHub's evaluator.
+# one's run, a repeat dispatch for one patchset must queue behind the
+# run in flight rather than cancel it, since cancelling cannot retract
+# a vote already sent over SSH, and a dispatch with no change number
+# must fall back to the run ID. GitHub compares group names
+# case-insensitively, so the comparisons here do too. The same
+# evaluator renders the group's expressions; it tests the key's
+# logic, not GitHub's evaluator.
 group_lines=$(grep -cE '^  group: ' "${example}" || true)
 group_template=$(sed -nE 's/^  group: (.*)$/\1/p' "${example}")
 if [ "${group_lines}" -eq 1 ] && [ -n "${group_template}" ] &&
-  grep -qxF '  cancel-in-progress: true' "${example}"; then
+  grep -qxF '  cancel-in-progress: false' "${example}"; then
   pass
 else
-  fail "expected one concurrency group, cancelling in progress" \
+  fail "expected one concurrency group, queueing in progress" \
     "$(grep -nE '^  (group|cancel-in-progress):' "${example}")"
 fi
 
