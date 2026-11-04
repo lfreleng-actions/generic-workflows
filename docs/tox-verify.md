@@ -41,6 +41,17 @@ The workflow has no `concurrency` block: concurrency belongs to the
 caller, which knows the change it runs for. The examples carry the
 recommended group.
 
+The Gerrit example's group is one per change: the workflow, the
+Gerrit project, branch and Change-Id (the run ID when that is
+empty), with `cancel-in-progress: false`. A repeat dispatch for one
+change waits for the run in flight rather than cancelling it:
+cancelling a run cannot retract a vote it has already sent over SSH,
+and the example's `vote` job runs under `always()`, so that vote
+could then land after the new run's `prepare` clear. GitHub keeps
+one pending run per group and replaces a pending one with a newer.
+A run cancelled by hand or by the platform still votes its
+conclusion.
+
 ## Inputs
 
 | Input                                  | Default                   | Purpose                                                                               |
@@ -284,7 +295,9 @@ Behaviour that changes on migration:
   rejects a `tox_envs` entry starting with `.` or `+`, and runs tox on
   Python 3.11 or newer. A `PYTHON_VERSION` older than 3.11 still
   works: see [Python version](#python-version).
-- The concurrency group moves from the reusable into the caller.
+- The concurrency group moves from the reusable into the caller,
+  with `cancel-in-progress: false`, so a cancelled run's vote cannot
+  land after its replacement's clear.
 - Every job runs behind harden-runner in block mode; a project that
   reaches a host off the organisation list needs a supplemental list,
   or `harden_runner_egress: audit` while it finds out which.
@@ -316,9 +329,11 @@ and a checkout configured with a persisted token. It also extracts the
 `Select the tox Python` script and checks which Pythons and override
 it chooses for 2.7 to 4.0 and for versions it cannot compare. It also fails when
 the `gerrit` script drifts from `change-isolation.yaml`'s, when a
-`run:` block interpolates an expression, and when a harden-runner pin
-is not v2.22.3. The `tox-verify-fixtures` prek hook runs it whenever
-either workflow or the script changes.
+`run:` block interpolates an expression, when a harden-runner pin is
+not v2.22.3, and when the Gerrit example's concurrency group
+stops being one per change or stops queueing in progress. The
+`tox-verify-fixtures` prek hook runs it whenever either workflow,
+the Gerrit example or the script changes.
 
 `.github/workflows/tox-verify-action.yaml` calls the workflow on this
 repository's own pull requests, in block mode, against the fixtures in

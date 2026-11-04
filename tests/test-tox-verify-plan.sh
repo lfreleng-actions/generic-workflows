@@ -569,6 +569,27 @@ else
   pass
 fi
 
+# The Gerrit example keys its concurrency group by project, branch
+# and Change-Id, and a repeat dispatch for one change must queue
+# behind the run in flight rather than cancel it, since cancelling
+# cannot retract a vote already sent over SSH.
+# The key is literal workflow syntax, not shell expansion.
+# shellcheck disable=SC2016
+group_key='inputs.GERRIT_PROJECT }}-${{ inputs.GERRIT_BRANCH }}-'
+# shellcheck disable=SC2016
+group_key+='${{ inputs.GERRIT_CHANGE_ID || github.run_id }}'
+example="${repo_root}/examples/tox-verify/gerrit-tox-verify.yaml"
+group_lines=$(grep -cE '^  group: ' "${example}" || true)
+group_template=$(sed -nE 's/^  group: (.*)$/\1/p' "${example}")
+if [ "${group_lines}" -eq 1 ] &&
+  grep -qF "${group_key}" <<< "${group_template}" &&
+  grep -qxF '  cancel-in-progress: false' "${example}"; then
+  pass
+else
+  fail "${example#"${repo_root}/"}: expected one per-change group, queueing" \
+    "$(grep -nE '^  (group|cancel-in-progress):' "${example}")"
+fi
+
 # --- Summary --------------------------------------------------------
 
 total=$((passed + failed))
