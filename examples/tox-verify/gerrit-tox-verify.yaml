@@ -108,12 +108,20 @@ on:
         default: ''
 
 concurrency:
-  # Gerrit allows the same Change-Id in more than one project, and a
-  # central '.github' repository dispatches for every project, so the
-  # project keeps one project's run from cancelling another's.
+  # One group per change, queued rather than cancelled. Cancelling a
+  # run cannot retract a vote it has already sent over SSH, and the
+  # 'vote' job runs under always(), so a cancelled run's vote could
+  # land after its replacement's 'prepare' clear and show a result
+  # before that run finishes. A repeat dispatch for the same change
+  # waits for the run in flight, and GitHub keeps one pending run per
+  # group, replacing a pending one with a newer, so each run's vote
+  # lands before the next run's clear. Gerrit allows the same
+  # Change-Id in more than one project, and a central '.github'
+  # repository dispatches for every project, so the project keeps one
+  # project's runs out of another's group.
   # yamllint disable-line rule:line-length
   group: tox-verify-${{ github.workflow }}-${{ inputs.GERRIT_PROJECT }}-${{ inputs.GERRIT_BRANCH }}-${{ inputs.GERRIT_CHANGE_ID || github.run_id }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions: {}
 
@@ -225,7 +233,10 @@ jobs:
     name: 'Set vote'
     # always() keeps a failed 'prepare' or 'tox-verify' from
     # skipping the vote; the visibility test still skips it when the
-    # change is unreadable or the check itself failed.
+    # change is unreadable or the check itself failed. A run cancelled
+    # by hand or by the platform still votes its conclusion. A recheck
+    # of the same change queues behind the run in flight rather than
+    # cancelling it.
     if: ${{ always() && needs.visibility.outputs.visible == 'true' }}
     needs: [visibility, prepare, tox-verify]
     runs-on: ubuntu-latest

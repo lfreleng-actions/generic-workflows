@@ -237,11 +237,12 @@ repos:
         # yamllint disable-line rule:line-length
         files: '^(\.github/workflows/linting\.yaml|tests/test-lint-plan-interpreter\.sh)$'
 
-  # Fixtures for the change isolation plan and report. The test
-  # extracts both scripts from the workflow, so it runs whenever
-  # either the workflow or the fixtures change. 'language: system'
-  # with an explicit bash: the scripts need only git and python3,
-  # which every runner of these hooks has.
+  # Fixtures for the change isolation plan and report, and for the
+  # Gerrit examples' concurrency. The test extracts both scripts from
+  # the workflow and reads the examples, so it runs whenever any of
+  # them or the fixtures change. 'language: system' with an explicit
+  # bash: the scripts need only git and python3, which every runner
+  # of these hooks has.
   - repo: local
     hooks:
       - id: change-isolation-fixtures
@@ -250,13 +251,15 @@ repos:
         language: system
         pass_filenames: false
         # yamllint disable-line rule:line-length
-        files: '^(\.github/workflows/change-isolation\.yaml|tests/test-change-isolation-plan\.sh)$'
+        files: '^(\.github/workflows/change-isolation\.yaml|examples/change-isolation/gerrit(-info-yaml-only)?\.yaml|tests/test-change-isolation-plan\.sh)$'
 
-  # Fixtures for the tox verify Gerrit and plan scripts. The test
-  # extracts both from the workflow, and compares the Gerrit script
-  # with change-isolation.yaml's, so it runs whenever either workflow
-  # or the fixtures change. 'language: system' with an explicit bash,
-  # as for the change isolation fixtures above.
+  # Fixtures for the tox verify Gerrit and plan scripts, and for the
+  # Gerrit example's concurrency. The test extracts both scripts from
+  # the workflow, compares the Gerrit script with
+  # change-isolation.yaml's and reads the example, so it runs
+  # whenever either workflow, the example or the fixtures change.
+  # 'language: system' with an explicit bash, as for the change
+  # isolation fixtures above.
   - repo: local
     hooks:
       - id: tox-verify-fixtures
@@ -265,15 +268,16 @@ repos:
         language: system
         pass_filenames: false
         # yamllint disable-line rule:line-length
-        files: '^(\.github/workflows/(tox-verify|change-isolation)\.yaml|tests/test-tox-verify-plan\.sh)$'
+        files: '^(\.github/workflows/(tox-verify|change-isolation)\.yaml|examples/tox-verify/gerrit-tox-verify\.yaml|tests/test-tox-verify-plan\.sh)$'
 
   # Fixtures for the ci-management verify Gerrit, plan and
   # credential-removal scripts. The test extracts them from the
   # workflow, compares the Gerrit script with change-isolation.yaml's
   # and the credential removal with tox-verify.yaml's, holds
   # linting-verify.yaml's copies of both to the same, and its
-  # harden-runner check to linting.yaml's, so it runs whenever any of
-  # the five workflows or the fixtures change.
+  # harden-runner check to linting.yaml's, and reads the Gerrit
+  # example's concurrency, so it runs whenever any of the five
+  # workflows, the example or the fixtures change.
   # 'language: system' with an explicit bash, as for the tox verify
   # fixtures above.
   - repo: local
@@ -284,7 +288,7 @@ repos:
         language: system
         pass_filenames: false
         # yamllint disable-line rule:line-length
-        files: '^(\.github/workflows/(ci-management-verify|linting(-verify)?|tox-verify|change-isolation)\.yaml|tests/test-ci-management-verify-plan\.sh)$'
+        files: '^(\.github/workflows/(ci-management-verify|linting(-verify)?|tox-verify|change-isolation)\.yaml|examples/ci-management/gerrit-ci-management-verify\.yaml|tests/test-ci-management-verify-plan\.sh)$'
 
   # Fixtures for the linting verify Gerrit, plan and harden-runner
   # scripts, for the example caller's vote rule, and for linting.yaml's

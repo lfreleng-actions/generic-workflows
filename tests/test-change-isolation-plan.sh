@@ -805,6 +805,29 @@ clean_results
 run_report INFO_YAML_STATE=bogus
 expect_report_fail 'unknown INFO.yaml state' 'Unknown INFO.yaml state'
 
+# The Gerrit examples each key their concurrency group by project,
+# branch and Change-Id, and a repeat dispatch for one change must queue
+# behind the run in flight rather than cancel it, since cancelling
+# cannot retract a vote already sent over SSH.
+# The key is literal workflow syntax, not shell expansion.
+# shellcheck disable=SC2016
+group_key='inputs.GERRIT_PROJECT }}-${{ inputs.GERRIT_BRANCH }}-'
+# shellcheck disable=SC2016
+group_key+='${{ inputs.GERRIT_CHANGE_ID || github.run_id }}'
+for example in "${repo_root}/examples/change-isolation/gerrit.yaml" \
+  "${repo_root}/examples/change-isolation/gerrit-info-yaml-only.yaml"; do
+  group_lines=$(grep -cE '^  group: ' "${example}" || true)
+  group_template=$(sed -nE 's/^  group: (.*)$/\1/p' "${example}")
+  if [ "${group_lines}" -eq 1 ] &&
+    grep -qF "${group_key}" <<< "${group_template}" &&
+    grep -qxF '  cancel-in-progress: false' "${example}"; then
+    pass
+  else
+    fail "${example#"${repo_root}/"}: expected one per-change group, queueing" \
+      "$(grep -nE '^  (group|cancel-in-progress):' "${example}")"
+  fi
+done
+
 # --- Summary --------------------------------------------------------
 
 total=$((passed + failed))

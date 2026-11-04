@@ -217,12 +217,19 @@ succeed and the conclusion still reads `success`.
 
 `vote` runs under `always()`, so a failed `prepare` or change
 isolation still earns a vote, provided `visibility` reported the
-change readable.
+change readable. A run cancelled by hand or by the platform still
+votes its conclusion. A recheck of the same change queues behind the
+run in flight rather than cancelling it.
 
 The examples' concurrency group names the Gerrit project as well as
 the branch and Change-Id: Gerrit allows the same Change-Id in more
 than one project, and a central `.github` repository dispatches for
-every project.
+every project. The examples set `cancel-in-progress: false`. A
+repeat dispatch for one change waits for the run in flight rather
+than cancelling it: cancelling a run cannot retract a vote it has
+already sent over SSH, which could then land after the new run's
+`prepare` clear. GitHub keeps one pending run per group and replaces
+a pending one with a newer.
 
 ## Private changes and the visibility gate
 
@@ -403,8 +410,11 @@ plan and report scripts from between their `BEGIN`/`END` markers and
 runs them against Gerrit URLs, throwaway git repositories and result
 files: accepted and rejected Gerrit URLs, valid and invalid `checks`, renames, `INFO.yaml` modified, removed and renamed away, an
 empty change, control characters in paths, violations, advisory
-violations and missing results. The `change-isolation-fixtures` prek
-hook runs it whenever the workflow or the script changes.
+violations and missing results. It also fails when either Gerrit
+example's concurrency group stops being one per change or stops
+queueing in progress. The `change-isolation-fixtures` prek hook runs
+it whenever the workflow, either Gerrit example or the script
+changes.
 
 `.github/workflows/change-isolation-action.yaml` calls the workflow on
 this repository's own pull requests, which exercises the job wiring

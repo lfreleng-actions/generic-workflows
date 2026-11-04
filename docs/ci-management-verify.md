@@ -47,7 +47,15 @@ merges, is [`ci-management-merge.yaml`](ci-management-merge.md).
 The two legs run in parallel, and each reports its own result. The
 workflow has no `concurrency` block, casts no vote and holds no SSH
 key: the caller owns all three. The example carries the recommended
-concurrency group.
+concurrency group, one per change: the workflow, the Gerrit project,
+branch and Change-Id (the run ID when that is empty), with
+`cancel-in-progress: false`. A repeat dispatch for one change waits
+for the run in flight rather than cancelling it: cancelling a run
+cannot retract a vote it has already sent over SSH, and the
+example's `vote` job runs under `always()`, so that vote could then
+land after the new run's `prepare` clear. GitHub keeps one pending
+run per group and replaces a pending one with a newer. A run
+cancelled by hand or by the platform still votes its conclusion.
 
 ## Inputs
 
@@ -196,9 +204,11 @@ It also fails when the `gerrit` script drifts from
 `change-isolation.yaml`'s, when either leg's credential removal
 drifts from the other's or from `tox-verify.yaml`'s, when a `run:`
 block interpolates an expression, when a harden-runner pin is not
-v2.22.3, and when the `Lint` leg's `cache_hooks` stops being `'false'`
-in Gerrit mode. The `ci-management-verify-fixtures` prek hook runs it
-whenever any of the three workflows or the script changes.
+v2.22.3, when the `Lint` leg's `cache_hooks` stops being `'false'`
+in Gerrit mode, and when the example's concurrency group stops being
+one per change or stops queueing in progress. The
+`ci-management-verify-fixtures` prek hook runs it whenever any of the
+workflows it reads, the example or the script changes.
 
 `.github/workflows/ci-management-verify-action.yaml` calls the
 workflow on this repository's own pull requests, in block mode,
@@ -263,4 +273,6 @@ Behaviour that changes on migration:
 - Every job runs behind harden-runner in block mode; a project that
   reaches a host off the organisation list needs a supplemental list,
   or `harden_runner_egress: audit` while it finds out which.
-- The concurrency group and the vote move into the caller.
+- The concurrency group and the vote move into the caller. Keep the
+  example's `cancel-in-progress: false`, so a cancelled run's vote
+  cannot land after its replacement's clear.
