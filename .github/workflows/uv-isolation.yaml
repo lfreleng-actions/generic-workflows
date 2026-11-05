@@ -25,7 +25,9 @@
 # One leg plants UV_PYTHON and UV_PYTHON_SEARCH_PATH; the other plants
 # VIRTUAL_ENV, CONDA_PREFIX and UV_INTERNAL__PARENT_INTERPRETER with
 # UV_PYTHON unset. Both put the bait directory on PATH and set
-# UV_PYTHON_ARCH and UV_NO_CACHE.
+# UV_PYTHON_ARCH and UV_NO_CACHE, and both point UV_PYTHON_INSTALL_DIR
+# at a checkout directory holding a bait 'uv': setup-uv puts that
+# directory on PATH ahead of its own and then runs a bare 'uv'.
 # =============================================================================
 name: 'uv isolation (self) 🐍'
 
@@ -77,12 +79,14 @@ jobs:
           marker="$RUNNER_TEMP/bait-marker"
           venv="$GITHUB_WORKSPACE/.venv"
           bait="$venv/bin"
-          mkdir -p "$bait" "$venv/conda-meta"
-          for name in python python3 python3.13 uv; do
+          install_dir="$GITHUB_WORKSPACE/uv-python-bait"
+          mkdir -p "$bait" "$venv/conda-meta" "$install_dir"
+          for path in "$bait"/{python,python3,python3.13,uv} \
+              "$install_dir/uv"; do
             # shellcheck disable=SC2016
             printf '#!/bin/sh\necho "$0 $*" >> "%s"\nexit 1\n' \
-              "$marker" > "$bait/$name"
-            chmod +x "$bait/$name"
+              "$marker" > "$path"
+            chmod +x "$path"
           done
           printf 'home = %s\nversion_info = 3.13.0\n' "$bait" \
             > "$venv/pyvenv.cfg"
@@ -90,6 +94,7 @@ jobs:
           {
             echo 'UV_PYTHON_ARCH=x86_64'
             echo 'UV_NO_CACHE=1'
+            echo "UV_PYTHON_INSTALL_DIR=$install_dir"
             case "$LEG" in
               uv-python)
                 echo "UV_PYTHON=$bait/python3"
@@ -123,6 +128,13 @@ jobs:
             echo '::error::The planted interpreters did not run'
             exit 1
           fi
+          # A bare 'uv' with UV_PYTHON_INSTALL_DIR first on PATH, as
+          # setup-uv runs it.
+          PATH="$UV_PYTHON_INSTALL_DIR:$PATH" uv --version || true
+          if ! grep -qF "$UV_PYTHON_INSTALL_DIR/uv" "$marker"; then
+            echo '::error::The planted uv did not run'
+            exit 1
+          fi
           rm -f "$marker"
 
       - name: 'Set up uv'
@@ -139,6 +151,7 @@ jobs:
           UV_NO_PROJECT: '1'
           UV_PYTHON_PREFERENCE: 'lookup-disabled'
           UV_PYTHON_ARCH: ''
+          UV_PYTHON_INSTALL_DIR: ${{ runner.temp }}/uv-python
 
       - name: 'Install Python'
         id: python

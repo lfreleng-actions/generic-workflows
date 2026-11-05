@@ -1797,6 +1797,11 @@ jobs:
       #   name. Step env only: later steps never see it.
       # - UV_PYTHON_ARCH: empty, because inherited it makes setup-uv
       #   probe uv, which the invalid preference above fails.
+      # - UV_PYTHON_INSTALL_DIR: the directory 'Install Python' uses.
+      #   setup-uv puts this directory on PATH ahead of its own uv
+      #   directory and then runs a bare 'uv', so an inherited value
+      #   naming a directory that holds a 'uv' would run that 'uv'
+      #   instead, and the preference above would never apply.
       #
       # No 'python-version' (it exports UV_PYTHON to every later
       # step), no 'activate-environment' and no UV_NO_MODIFY_PATH
@@ -1817,6 +1822,7 @@ jobs:
           UV_NO_PROJECT: '1'
           UV_PYTHON_PREFERENCE: 'lookup-disabled'
           UV_PYTHON_ARCH: ''
+          UV_PYTHON_INSTALL_DIR: ${{ runner.temp }}/uv-python
 
       # The interpreter the resolver runs under, installed by uv into
       # a directory under RUNNER_TEMP. 'env -i' with an allow-list
