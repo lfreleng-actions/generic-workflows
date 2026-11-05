@@ -633,6 +633,12 @@ fixed `github.com:443` list instead and take none of them.
 of these inputs, changes its type or default, passes it in another
 form, or lets a block-action step carry on past a missing named list.
 The set thus stays the same across every `*-workflows` repository.
+Every block-action step in a repository must pin the same commit SHA,
+with a `# vX.Y.Z` comment naming the same release, at or above
+`v0.15.0`, the first with `extra_endpoints`. A newer release passes,
+and a Dependabot bump does not fail the check. Each input's description
+starts with the reference wording the script holds, and may add a
+note about the workflow after a full stop.
 `extra_endpoints` has one other accepted form: one earlier job's
 output followed by the caller's input. `linting-verify.yaml` uses it
 to add the Gerrit endpoint its `gerrit` job validated, so the
