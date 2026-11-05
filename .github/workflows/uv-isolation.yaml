@@ -1,0 +1,205 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# =============================================================================
+# uv interpreter isolation (self-test)
+# =============================================================================
+# The lint plan job in linting.yaml sets up uv and installs the Python
+# its resolver runs under so that neither the checkout nor the job's
+# environment can choose that interpreter. A called job inherits no
+# 'env' from its caller, but any earlier step of the job can export
+# variables through GITHUB_ENV and directories through GITHUB_PATH,
+# and setup-uv, 'uv python find' and 'uv run' all consult them.
+#
+# This job plants bait interpreters on both routes before the uv
+# steps run, then runs the 'Set up uv' and 'Install Python' steps of
+# linting.yaml, the resolver's 'uv run' line and the interpreter
+# fixtures, and fails if any bait ran. A control first shows the bait
+# is live, so the job cannot pass because the plant never worked.
+#
+# The two steps are copies, as a job cannot call another workflow's
+# steps; tests/test-lint-plan-interpreter.sh fails when they differ
+# from linting.yaml's in anything but the 'if:' line.
+#
+# One leg plants UV_PYTHON and UV_PYTHON_SEARCH_PATH; the other plants
+# VIRTUAL_ENV, CONDA_PREFIX and UV_INTERNAL__PARENT_INTERPRETER with
+# UV_PYTHON unset. Both put the bait directory on PATH and set
+# UV_PYTHON_ARCH and UV_NO_CACHE.
+# =============================================================================
+name: 'uv isolation (self) 🐍'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions: {}
+
+concurrency:
+  group: 'uv-isolation-self-${{ github.ref }}'
+  cancel-in-progress: true
+
+jobs:
+  uv-isolation:
+    name: 'uv isolation (${{ matrix.leg }})'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: ['uv-python', 'venv']
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: 'audit'
+
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Each bait appends to the marker and exits 1, so uv, which
+      # skips an interpreter that fails, carries on: only the marker
+      # shows that one ran.
+      - name: 'Plant bait interpreters'
+        shell: bash
+        env:
+          LEG: ${{ matrix.leg }}
+        run: |
+          # Plant bait interpreters
+          marker="$RUNNER_TEMP/bait-marker"
+          venv="$GITHUB_WORKSPACE/.venv"
+          bait="$venv/bin"
+          mkdir -p "$bait" "$venv/conda-meta"
+          for name in python python3 python3.13 uv; do
+            # shellcheck disable=SC2016
+            printf '#!/bin/sh\necho "$0 $*" >> "%s"\nexit 1\n' \
+              "$marker" > "$bait/$name"
+            chmod +x "$bait/$name"
+          done
+          printf 'home = %s\nversion_info = 3.13.0\n' "$bait" \
+            > "$venv/pyvenv.cfg"
+          echo "$bait" >> "$GITHUB_PATH"
+          {
+            echo 'UV_PYTHON_ARCH=x86_64'
+            echo 'UV_NO_CACHE=1'
+            case "$LEG" in
+              uv-python)
+                echo "UV_PYTHON=$bait/python3"
+                echo "UV_PYTHON_SEARCH_PATH=$bait"
+                ;;
+              venv)
+                echo "VIRTUAL_ENV=$venv"
+                echo "CONDA_PREFIX=$venv"
+                echo "UV_INTERNAL__PARENT_INTERPRETER=$bait/python3"
+                ;;
+            esac
+          } >> "$GITHUB_ENV"
+
+      # The system Python by absolute path: a PATH lookup would find
+      # the bait itself.
+      - name: 'Control: the bait is live'
+        shell: bash
+        run: |
+          # Control: the bait is live
+          marker="$RUNNER_TEMP/bait-marker"
+          /usr/bin/python3 -I -c '
+          import os, shutil, subprocess
+          baits = [shutil.which("python3")]
+          for name in ("UV_PYTHON", "UV_INTERNAL__PARENT_INTERPRETER"):
+              if os.environ.get(name):
+                  baits.append(os.environ[name])
+          for bait in baits:
+              subprocess.run([bait, "--version"], check=False)
+          ' || true
+          if [ ! -s "$marker" ]; then
+            echo '::error::The planted interpreters did not run'
+            exit 1
+          fi
+          rm -f "$marker"
+
+      - name: 'Set up uv'
+        id: setup-uv
+        # yamllint disable-line rule:line-length
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          version: '0.13.4'
+          working-directory: ${{ runner.temp }}
+          tool-bin-dir: ${{ runner.temp }}/uv-tool-bin
+          enable-cache: false
+        env:
+          UV_NO_CONFIG: '1'
+          UV_NO_PROJECT: '1'
+          UV_PYTHON_PREFERENCE: 'lookup-disabled'
+          UV_PYTHON_ARCH: ''
+
+      - name: 'Install Python'
+        id: python
+        shell: bash
+        working-directory: ${{ runner.temp }}
+        env:
+          UV: ${{ steps.setup-uv.outputs.uv-path }}
+          INSTALL_DIR: ${{ runner.temp }}/uv-python
+        run: |
+          # Install Python
+          clean=(UV_NO_CONFIG=1 UV_NO_PROJECT=1
+            "UV_PYTHON_INSTALL_DIR=$INSTALL_DIR"
+            "UV_CACHE_DIR=$RUNNER_TEMP/uv-cache")
+          for name in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy \
+              https_proxy all_proxy no_proxy SSL_CERT_FILE SSL_CERT_DIR \
+              UV_NATIVE_TLS; do
+            if [ -n "${!name+set}" ]; then clean+=("$name=${!name}"); fi
+          done
+          env -i "${clean[@]}" "$UV" python install --quiet --no-bin 3.13
+          py=$(env -i "${clean[@]}" "$UV" python find --managed-python 3.13)
+          case "$py" in
+            "$INSTALL_DIR"/*) ;;
+            *) echo "::error::uv found Python outside its install directory"
+               exit 1 ;;
+          esac
+          echo "path=$py" >> "$GITHUB_OUTPUT"
+
+      # From the checkout, beside the planted '.venv/', as the
+      # resolve step runs.
+      - name: 'Run the resolver command'
+        shell: bash
+        env:
+          PYTHON: ${{ steps.python.outputs.path }}
+        run: |
+          # Run the resolver command
+          uv run --no-project --no-config --with pyyaml==6.0.2 \
+            --python "$PYTHON" \
+            python -I -c 'import yaml; print(yaml.__version__)'
+
+      # The fixtures plant their own bait and variables. Their
+      # controls must reach a bait and, inheriting PATH, would reach
+      # this job's too, so the job's bait directory leaves PATH here;
+      # the fixtures unset the planted variables themselves.
+      - name: 'Run the interpreter fixtures'
+        shell: bash
+        run: |
+          # Run the interpreter fixtures
+          bait="$GITHUB_WORKSPACE/.venv/bin"
+          PATH="$(tr ':' '\n' <<< "$PATH" | grep -vxF "$bait" |
+            paste -sd: -)"
+          bash tests/test-lint-plan-interpreter.sh
+
+      - name: 'Check no bait ran'
+        if: always()
+        shell: bash
+        run: |
+          # Check no bait ran
+          marker="$RUNNER_TEMP/bait-marker"
+          if [ -e "$marker" ]; then
+            echo '::error::A planted interpreter ran:'
+            cat "$marker"
+            exit 1
+          fi
+          echo 'No planted interpreter ran ✅'
