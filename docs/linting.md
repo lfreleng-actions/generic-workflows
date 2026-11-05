@@ -502,8 +502,12 @@ configuration is attacker-controlled.
   `UV_PYTHON_PREFERENCE` and an empty `UV_PYTHON_ARCH` set: setup-uv
   runs `uv python find --directory` on its working directory and
   executes the result, and the invalid preference makes uv refuse
-  that lookup before it runs anything. The post step's
-  `uv cache prune` would hit the same refusal, hence no cache; the
+  that lookup before it runs anything. The step also sets
+  `UV_PYTHON_INSTALL_DIR` to the `Install Python` directory: setup-uv
+  puts that directory on `PATH` ahead of its own uv and runs a bare
+  `uv`, so an inherited value naming a directory with a `uv` in it
+  would run that `uv` and the preference would never apply. The post
+  step's `uv cache prune` would hit the same refusal, hence no cache; the
   one package the job installs is the PyYAML the `uv run` line pins.
   `tests/test-lint-plan-interpreter.sh` runs the steps beside a
   planted `.venv/`, `.python-version` and `uv.toml`, and again with
@@ -514,7 +518,8 @@ configuration is attacker-controlled.
   The `uv isolation (self)` workflow, `uv-isolation.yaml`, runs the
   same two steps and the fixtures on a real runner after an earlier
   step plants bait interpreters through `GITHUB_ENV` and
-  `GITHUB_PATH`, and fails if any of them ran.
+  `GITHUB_PATH`, including a bait `uv` in the directory
+  `UV_PYTHON_INSTALL_DIR` names, and fails if any of them ran.
 - **The job summary redacts `config_url`.** The accepted URL grammar
   admits a query string, which is how a private configuration
   commonly arrives — a presigned URL. The summary, which anyone able

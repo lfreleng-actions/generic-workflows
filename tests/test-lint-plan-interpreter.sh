@@ -119,7 +119,9 @@ else
   # setup-uv executes the interpreter 'uv python find --directory
   # <working-directory>' returns, and reads 'cache-dir' from a
   # 'uv.toml' there, so it must not run in the checkout; the invalid
-  # preference makes uv refuse that lookup before it looks.
+  # preference makes uv refuse that lookup before it looks. setup-uv
+  # puts UV_PYTHON_INSTALL_DIR on PATH ahead of its own uv and runs a
+  # bare 'uv', so the step names that directory itself.
   # shellcheck disable=SC2016
   for pin in \
     'id: setup-uv' \
@@ -129,7 +131,8 @@ else
     "UV_NO_CONFIG: '1'" \
     "UV_NO_PROJECT: '1'" \
     "UV_PYTHON_PREFERENCE: 'lookup-disabled'" \
-    "UV_PYTHON_ARCH: ''"; do
+    "UV_PYTHON_ARCH: ''" \
+    'UV_PYTHON_INSTALL_DIR: ${{ runner.temp }}/uv-python'; do
     if has_line "${setup_step}" "${pin}"; then
       pass
     else
@@ -333,6 +336,7 @@ run_step() {
     -u UV_PYTHON -u UV_PYTHON_SEARCH_PATH -u VIRTUAL_ENV \
     -u CONDA_PREFIX -u UV_INTERNAL__PARENT_INTERPRETER \
     -u UV_PYTHON_PREFERENCE -u UV_SYSTEM_PYTHON \
+    -u UV_PYTHON_INSTALL_DIR \
     GITHUB_WORKSPACE="${checkout}" \
     RUNNER_TEMP="${runner_temp}" \
     GITHUB_OUTPUT="${workdir}/out" \
