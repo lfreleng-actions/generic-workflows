@@ -8,10 +8,11 @@
 # allow-list through lfreleng-actions/harden-runner-block-action must
 # expose the same five harden_runner_* inputs and pass every one of
 # them through on each block-action step in one fixed form. Every
-# block-action step in the directory pins the same commit SHA, with a
-# '# vX.Y.Z' comment naming the same release on each line, at or above
-# MIN_VERSION; the comments come from the raw text, on the line each
-# step's 'uses:' value starts on, since the YAML parser drops them.
+# block-action step in every workflow of the directory, reusable or
+# not, pins the same commit SHA, with a '# vX.Y.Z' comment naming the
+# same release on each line, at or above MIN_VERSION; the comments come
+# from the raw text, on the line each step's 'uses:' value starts on,
+# since the YAML parser drops them.
 # extra_endpoints alone has a second form: one earlier job's output
 # followed by the caller's input, for an endpoint the workflow
 # resolves at run time and wants DNS-checked.
@@ -366,22 +367,30 @@ def check_pins(pins):
 
 
 def check_dir(path):
-    """Return (workflows checked, [(workflow, problem)]) for path."""
+    """Return (reusable checked, pinned, [(workflow, problem)]) for path.
+
+    The input contract applies to reusable workflows alone; the pin
+    rules apply to every workflow with a block-action step, reusable
+    or not.
+    """
     checked = 0
+    pinned = 0
     problems = []
     pins = []
     for workflow in sorted(path.glob("*.y*ml")):
         text = workflow.read_text(encoding="utf-8")
         doc = yaml.safe_load(text)
-        if not isinstance(doc, dict) or not inspected(doc):
+        if not isinstance(doc, dict) or not any(block_steps(doc)):
             continue
-        checked += 1
-        problems.extend((workflow, p) for p in check_doc(doc))
+        pinned += 1
+        if inspected(doc):
+            checked += 1
+            problems.extend((workflow, p) for p in check_doc(doc))
         found, unread = read_pins(text, doc)
         problems.extend((workflow, p) for p in unread)
         pins.extend((workflow, *pin) for pin in found)
     problems.extend(check_pins(pins))
-    return checked, problems
+    return checked, pinned, problems
 
 
 def mutants(doc):
@@ -502,6 +511,48 @@ PIN_FIXTURES = (
 )
 
 
+# Text fixtures for the pin rules across a non-reusable workflow:
+# (label, passes, the pin of its block-action step as (sha, comment),
+# and whether its 'run:' script carries a 'uses:' line as text), beside
+# two copies of the reusable workflow on NEW_SHA, v0.16.1.
+OTHER_SHA = "f" * 40
+PLAIN_FIXTURES = (
+    ("a different SHA", False, (OTHER_SHA, "v0.16.1"), False),
+    ("no version comment", False, (NEW_SHA, None), False),
+    ("a version below the floor", False, (NEW_SHA, "v0.14.0"), False),
+    ("an outdated 'uses:' line in its script", True,
+     (NEW_SHA, "v0.16.1"), True),
+    ("the same pin, v0.16.1", True, (NEW_SHA, "v0.16.1"), False),
+)
+
+
+def plain_workflow(sha, comment, script):
+    """Return the text of a non-reusable workflow with one block step."""
+    tail = "" if comment is None else f"  # {comment}"
+    text = (
+        "---\n"
+        "name: Plain\n"
+        "on:\n"
+        "  push:\n"
+        "    branches: [main]\n"
+        "jobs:\n"
+        "  plain:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      # Load the allow-list.\n"
+        f"      - uses: {ACTION}@{sha}{tail}\n"
+    )
+    if script:
+        text += (
+            "      - name: Search\n"
+            "        run: |\n"
+            "          grep -rF -f - .github <<'EOF'\n"
+            f"          uses: {ACTION}@{OTHER_SHA}  # v0.14.0\n"
+            "          EOF\n"
+        )
+    return text
+
+
 def repin(text, sha, comment, quote):
     """Rewrite every block-action 'uses:' line of text to one pin."""
     tail = "" if comment is None else f"  # {comment}"
@@ -569,27 +620,55 @@ def self_test(path):
                         print(f"::error::no jobs key for fixture {label}")
                         wrong += 1
                 copy_path.write_text(fixture, encoding="utf-8")
-            checked, problems = check_dir(pathlib.Path(scratch))
+            checked, _, problems = check_dir(pathlib.Path(scratch))
         if checked == 2 and (not problems) == expect_pass:
             right += 1
         else:
             print(f"::error::pin fixture with {label}: wrong result")
             wrong += 1
     print(f"Pin fixtures as expected: {right}/{len(PIN_FIXTURES)}")
+    right = 0
+    for label, expect_pass, pin, script in PLAIN_FIXTURES:
+        with tempfile.TemporaryDirectory() as scratch:
+            for prefix in "ab":
+                copy_path = pathlib.Path(scratch) / f"{prefix}-{workflow.name}"
+                copy_path.write_text(
+                    repin(text, NEW_SHA, "v0.16.1", ""), encoding="utf-8"
+                )
+            (pathlib.Path(scratch) / "plain.yaml").write_text(
+                plain_workflow(*pin, script), encoding="utf-8"
+            )
+            checked, pinned, problems = check_dir(pathlib.Path(scratch))
+        if (
+            checked == 2 and pinned == 3
+            and (not problems) == expect_pass
+        ):
+            right += 1
+        else:
+            print(
+                f"::error::non-reusable pin fixture with {label}:"
+                " wrong result"
+            )
+            wrong += 1
+    print(
+        f"Non-reusable pin fixtures as expected: {right}"
+        f"/{len(PLAIN_FIXTURES)}"
+    )
     return wrong
 
 
 root = pathlib.Path(sys.argv[1])
-checked, problems = check_dir(root)
+checked, pinned, problems = check_dir(root)
 if not checked:
     print(f"::error::no workflow_call workflow uses {ACTION} in {root}")
     sys.exit(1)
 for workflow, problem in problems:
     print(f"::error file={workflow}::{problem}")
 if problems:
-    print(f"{len(problems)} problem(s) across {checked} workflow(s) ❌")
+    print(f"{len(problems)} problem(s) across {pinned} workflow(s) ❌")
     sys.exit(1)
 print(f"{checked} workflow(s) expose and pass every input ✅")
+print(f"{pinned} workflow(s) pin one block-action release ✅")
 if self_test(root):
     sys.exit(1)
 PYEOF
