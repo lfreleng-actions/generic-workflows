@@ -143,6 +143,10 @@ Modes, in precedence order:
 
 <!-- markdownlint-enable MD013 -->
 
+Which hooks belong under `ci.skip`, and what keeps them enforced once
+there, is in
+[Hooks pre-commit.ci cannot run](#hooks-pre-commitci-cannot-run).
+
 `skip_hooks` sits across these: it excludes ids from whichever set
 the mode selected, and is how a caller says "everything except
 these" — `hooks` names a subset to include, which cannot express an
@@ -659,6 +663,76 @@ A large project may also need more than the default
 The [executor's README](https://github.com/lfreleng-actions/standalone-linting-action#readme)
 recommends hook definitions for both languages, and explains why the
 Node.js hooks must be `language: system`.
+
+## Hooks pre-commit.ci cannot run
+
+pre-commit.ci gives a run **3 minutes**, and the limit covers the
+whole run, not each hook. A hook belongs under `ci.skip` when it:
+
+- needs network access, which the pre-commit.ci sandbox does not have;
+- needs a tool the pre-commit.ci runner image lacks, `jq` and `uv`
+  among them;
+- needs a project toolchain or `node_modules` (see
+  [Project toolchains](#project-toolchains)); or
+- is slow, or duplicates another job, so the whole run approaches the
+  limit.
+
+**Recognising it.** pre-commit.ci prints a timeout against the hook
+running when the limit hit, which is not necessarily the slow one.
+Compare the `run (…)` duration on the pre-commit.ci result page across
+recent passing runs, and time each hook locally with
+`prek run --all-files <hook-id>`. A hook that passes locally and fails
+in pre-commit.ci alone tends to need a missing tool or the network. A
+result of `error during mergeable check: PR is already merged!` is not
+a failure: the run queued until the pull request had merged.
+
+Two measured cases:
+
+- **A time limit.** The `github-code-monkey-bot` run grew from 2m29s
+  to 2m56s as its offline test suite grew from 774 to 1015 tests, then
+  failed twice, at 3m00.4s and 3m00.6s, with `basedpyright (timeout`
+  as the last line. `basedpyright` takes 2 seconds there; the 22 second
+  test suite is the cost, and it duplicates a CI job. The time did not
+  depend on the size of the change.
+- **A missing tool.** In `generic-workflows` pull request #137, a
+  fixture hook pipes a script through `jq`. pre-commit.ci's runner has
+  no `jq`, so the hook reported `Unexpected isDraft ''` for valid input
+  and failed 4 of its 10 cases; the same hook passes locally and on a
+  GitHub runner.
+
+**Enforcing it.** Under `ci.skip`, nothing runs the hook until a
+workflow does. Call this workflow with `ci_skipped: true`, as
+[`examples/linting/github.yaml`](../examples/linting/github.yaml)
+does:
+
+```yaml
+jobs:
+  linting:
+    name: 'Linting'
+    permissions:
+      contents: read
+    uses: lfreleng-actions/generic-workflows/.github/workflows/linting.yaml@<sha>
+    with:
+      ci_skipped: true
+```
+
+Every hook later added to `ci.skip` is then enforced with no further
+edit. `skip_hooks` subtracts a hook another job already runs, such as
+a test suite a separate workflow runs, so it does not run twice; see
+[Selecting what runs](#selecting-what-runs).
+
+The trap runs the other way too: nothing enforces a hook under
+`ci.skip` that no workflow runs. `github-code-monkey-bot` skips
+`gha-workflow-linter` and `aislop`, and nothing else runs them.
+
+**Checking it.** After changing `ci.skip`, the pull request's `Linting`
+job summary must list the hook. Nothing enforces a skipped hook absent
+from that summary.
+
+**What not to do.** Do not move a hook to `ci.skip` on the strength
+of one failure whose cause nobody has found. Do not raise a timeout:
+pre-commit.ci sets its own and nobody can change it. Do not drop the
+hook.
 
 ## Runner
 
