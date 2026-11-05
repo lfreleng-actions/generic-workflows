@@ -235,7 +235,7 @@ repos:
         language: system
         pass_filenames: false
         # yamllint disable-line rule:line-length
-        files: '^(\.github/workflows/linting\.yaml|tests/test-lint-plan-interpreter\.sh)$'
+        files: '^(\.github/workflows/(linting|uv-isolation)\.yaml|tests/test-lint-plan-interpreter\.sh)$'
 
   # Fixtures for the change isolation plan and report, and for the
   # Gerrit examples' concurrency. The test extracts both scripts from

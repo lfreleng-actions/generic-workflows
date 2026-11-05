@@ -39,6 +39,7 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 workflow="${repo_root}/.github/workflows/linting.yaml"
+self_test="${repo_root}/.github/workflows/uv-isolation.yaml"
 
 if [ ! -f "${workflow}" ]; then
   echo "ERROR: workflow not found: ${workflow}" >&2
@@ -65,10 +66,11 @@ fail() {
 }
 
 # Print the body of a step's 'run: |' block, dedented, or the whole
-# step when $2 is 'step'. Ends at the first non-blank line indented
-# less than the block (the next key or step).
+# step when $2 is 'step', from the workflow file $3 (linting.yaml by
+# default). Ends at the first non-blank line indented less than the
+# block (the next key or step).
 extract() {
-  local name="$1" what="${2:-run}"
+  local name="$1" what="${2:-run}" file="${3:-${workflow}}"
   awk -v name="- name: '${name}'" -v what="${what}" '
     function indent_of(s) { return match(s, /[^ ]/) - 1 }
     !in_step {
@@ -96,7 +98,7 @@ extract() {
       if (indent_of($0) < body_indent) exit
       print substr($0, body_indent + 1)
     }
-  ' "${workflow}"
+  ' "${file}"
 }
 
 
@@ -187,6 +189,21 @@ then
 else
   fail "the resolve step no longer takes PYTHON from 'Install Python'"
 fi
+
+# uv-isolation.yaml runs copies of both steps under planted job
+# variables on a real runner; a copy that drifts tests nothing.
+# Compared without the 'if:' line, which only linting.yaml needs.
+for step in 'Set up uv' 'Install Python'; do
+  ours="$(extract "${step}" step | grep -vE '^[[:space:]]+if: ')"
+  theirs="$(extract "${step}" step "${self_test}")"
+  if [ -n "${ours}" ] && [ "${ours}" = "${theirs}" ]; then
+    pass
+  else
+    fail "uv-isolation.yaml's '${step}' step differs from linting.yaml's"
+    diff <(printf '%s\n' "${ours}") <(printf '%s\n' "${theirs}") |
+      sed 's/^/  /' >&2 || true
+  fi
+done
 
 block="${workdir}/resolve.sh"
 extract 'Resolve lint plan' > "${block}"

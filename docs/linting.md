@@ -511,6 +511,10 @@ configuration is attacker-controlled.
   `CONDA_PREFIX` and `UV_INTERNAL__PARENT_INTERPRETER` naming
   planted interpreters. It asserts a real plan and no planted
   interpreter run, and shows the previous commands do run one.
+  The `uv isolation (self)` workflow, `uv-isolation.yaml`, runs the
+  same two steps and the fixtures on a real runner after an earlier
+  step plants bait interpreters through `GITHUB_ENV` and
+  `GITHUB_PATH`, and fails if any of them ran.
 - **The job summary redacts `config_url`.** The accepted URL grammar
   admits a query string, which is how a private configuration
   commonly arrives — a presigned URL. The summary, which anyone able
