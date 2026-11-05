@@ -84,7 +84,7 @@ jobs:
     uses: $/.github/workflows/linting.yaml
     with:
       # The hooks pre-commit.ci is told to skip, so the ones nothing
-      # else covers. One hook today: gha-workflow-linter.
+      # else covers. Runs every hook listed under ci.skip.
       ci_skipped: true
       # If the organisation allow-list lacks a host the workflow
       # itself needs, this job fails, before any consumer that opted
