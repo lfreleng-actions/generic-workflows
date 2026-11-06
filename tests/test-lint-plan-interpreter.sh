@@ -265,9 +265,11 @@ SH
 checkout="${workdir}/checkout"
 runner_temp="${workdir}/runner-temp"
 install_dir="${runner_temp}/uv-python"
+empty_install_dir="${workdir}/empty-python"
 marker="${workdir}/marker"
 bait_bin="${checkout}/.venv/bin"
-mkdir -p "${bait_bin}" "${checkout}/.venv/conda-meta" "${runner_temp}"
+mkdir -p "${bait_bin}" "${checkout}/.venv/conda-meta" "${runner_temp}" \
+  "${empty_install_dir}"
 cp "${repo_root}/.pre-commit-config.yaml" "${checkout}/"
 
 # Executable at run time only: nothing committed needs the mode.
@@ -432,11 +434,19 @@ for name in checkout uv-python venv; do
 
   # The variable legs only: the checkout leg plants nothing that a
   # lookup from RUNNER_TEMP would reach.
+  # Under the default 'managed' preference uv searches managed
+  # installations before the search path, '--system' or not, so a
+  # 'uv python install' in uv's default directory on a developer
+  # machine wins and these lookups never reach the plant. The controls
+  # alone get an empty install directory; the real cases keep
+  # run_step's '-u UV_PYTHON_INSTALL_DIR'.
   if [ "${name}" != 'checkout' ]; then
-    run_step "${old_lookup}" "${leg[@]}" || true
+    run_step "${old_lookup}" "${leg[@]}" \
+      UV_PYTHON_INSTALL_DIR="${empty_install_dir}" || true
     marker_set "[${name}] 'uv python find --system'"
     run_step "${lookup}" "${leg[@]}" UV_NO_CONFIG=1 UV_NO_PROJECT=1 \
-      UV_SYSTEM_PYTHON=1 || true
+      UV_SYSTEM_PYTHON=1 UV_PYTHON_INSTALL_DIR="${empty_install_dir}" ||
+      true
     marker_set "[${name}] setup-uv's lookup without the preference"
   fi
 done
