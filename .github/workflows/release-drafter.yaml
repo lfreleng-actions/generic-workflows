@@ -9,6 +9,9 @@ on:
   push:
     branches:
       - main
+  # Allows the draft to be refreshed by hand, e.g. after Actions were
+  # disabled while pull requests merged and the push events were missed.
+  workflow_dispatch:
 
 permissions: {}
 
