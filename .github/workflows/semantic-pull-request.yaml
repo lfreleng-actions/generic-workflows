@@ -157,7 +157,7 @@ on:
         required: false
         type: string
         # yamllint disable-line rule:line-length
-        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6e6cab073a93c0d58e4e8846d44e1cbddbac975b'  # v0.21.0
       harden_runner_supplemental_allowlist:
         description: >-
           Extra harden-runner allow-list merged with
@@ -233,7 +233,7 @@ jobs:
       # forced a fallback to audit mode.
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
+        uses: lfreleng-actions/harden-runner-block-action@f5a475661142cd2f1611ae6fbf8af2be0f36a9a7  # v0.16.3
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           # yamllint disable-line rule:line-length
@@ -584,7 +584,7 @@ jobs:
 
       - name: 'Validate pull request title'
         # yamllint disable-line rule:line-length
-        uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50  # v6.1.1
+        uses: amannn/action-semantic-pull-request@2252a14e810aa9b85c2d560bd7070c802206ecf6  # v6.1.2
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:

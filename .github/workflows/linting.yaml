@@ -402,7 +402,7 @@ on:
         required: false
         type: string
         # yamllint disable-line rule:line-length
-        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6e6cab073a93c0d58e4e8846d44e1cbddbac975b'  # v0.21.0
       harden_runner_supplemental_allowlist:
         description: >-
           Extra harden-runner allow-list merged with
@@ -478,7 +478,7 @@ jobs:
         # yamllint disable-line rule:line-length
         continue-on-error: ${{ inputs.harden_runner_egress != 'block' && inputs.harden_runner_supplemental_allowlist == '' }}
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
+        uses: lfreleng-actions/harden-runner-block-action@f5a475661142cd2f1611ae6fbf8af2be0f36a9a7  # v0.16.3
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           # yamllint disable-line rule:line-length
@@ -3389,7 +3389,7 @@ jobs:
         # yamllint disable-line rule:line-length
         continue-on-error: ${{ inputs.harden_runner_egress != 'block' && inputs.harden_runner_supplemental_allowlist == '' }}
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
+        uses: lfreleng-actions/harden-runner-block-action@f5a475661142cd2f1611ae6fbf8af2be0f36a9a7  # v0.16.3
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           # yamllint disable-line rule:line-length
@@ -3703,7 +3703,7 @@ jobs:
         # and names the stage. So a green check from this workflow no
         # longer depends on whether an exclusion happened to be set.
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/standalone-linting-action@a00b2febdcb6da5332f77e829dfdc131a91b8fce  # v0.10.1
+        uses: lfreleng-actions/standalone-linting-action@0a60cf5241a83be396fdd56bb63e9be11dd90b06  # v0.10.2
         with:
           hooks: ${{ matrix.hooks }}
           # Forwarded to EVERY task, so an exclusion is a policy for
