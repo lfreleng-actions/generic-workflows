@@ -200,8 +200,9 @@ In GitHub mode the job checks out with `actions/checkout` and
 credential.
 
 In Gerrit mode it checks out with
-`lfreleng-actions/checkout-gerrit-change-action` v1.3.0, which
-persists its token and has no input to stop it. The
+`lfreleng-actions/checkout-gerrit-change-action` v1.4.1, which
+persists its token by default; the job leaves its
+`persist-credentials` input unset. The
 `Remove checkout credentials` step, the one
 `ci-management-verify.yaml` runs, then deletes the credentials file
 and every `includeIf` entry or `http.<url>.extraheader` that names

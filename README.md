@@ -285,7 +285,7 @@ filters as a `workflow_dispatch` form and delegates to it.
 | `ref_filter`                           | `string`  | `''`              | Limit deletion to one git ref, such as `refs/heads/main`; empty ignores the ref |
 | `dry_run`                              | `boolean` | `false`           | List the matching entries and delete nothing                                    |
 | `harden_runner_egress`                 | `string`  | `block`           | Egress policy: `block` or `audit`                                               |
-| `harden_runner_allowlist`              | `string`  | `.github` v0.19.0 | Out-of-band allow-list coordinate                                               |
+| `harden_runner_allowlist`              | `string`  | `.github` v0.21.0 | Out-of-band allow-list coordinate                                               |
 | `harden_runner_supplemental_allowlist` | `string`  | `''`              | Extra allow-list merged with the baseline, for project-specific hosts           |
 | `harden_runner_supplemental_unpinned`  | `boolean` | `false`           | Follow the supplemental list at its default branch; same organisation alone     |
 | `harden_runner_extra_endpoints`        | `string`  | `''`              | Inline `host:port` endpoints added to the allow-list; a short-term fix          |
