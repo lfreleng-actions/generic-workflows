@@ -234,7 +234,7 @@ execution.
 
 ## Network egress
 
-Every job starts with `step-security/harden-runner` v2.22.3, in
+Every job starts with `step-security/harden-runner` v2.22.4, in
 `block` mode unless `harden_runner_egress` is `audit`.
 
 - `gerrit` and `plan` talk to GitHub alone, and allow
@@ -338,7 +338,7 @@ offline:
   number the run ID; seven mutants of the key caught.
 
 It also fails when a `run:` block interpolates an expression, when a
-harden-runner pin is not v2.22.3 or a job lacks one, when the
+harden-runner pin is not v2.22.4 or a job lacks one, when the
 workflow gains a `concurrency` block or hands the hooks a token, when
 the harden-runner check stops preceding the checkouts, when the
 Gerrit endpoint leaves the loader's `extra_endpoints`, follows the

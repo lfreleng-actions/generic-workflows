@@ -135,15 +135,15 @@ else
   fail 'a run block interpolates an expression' "${interpolated}"
 fi
 
-# Every harden-runner pin is v2.22.3, which fixes the westus2 DNS
-# bypass, and every job carries one.
+# Every harden-runner pin is v2.22.4, which keeps the westus2 DNS
+# bypass fix from v2.22.3, and every job carries one.
 stale_pins=$(grep -n 'step-security/harden-runner@' "${workflow}" |
-  grep -v '@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3$' ||
+  grep -v '@1d88384fd173af6ecb012dfd0264a306b711241a  # v2.22.4$' ||
   true)
 if [ -z "${stale_pins}" ]; then
   pass
 else
-  fail 'a harden-runner pin is not v2.22.3' "${stale_pins}"
+  fail 'a harden-runner pin is not v2.22.4' "${stale_pins}"
 fi
 harden_runs=$(grep -c 'step-security/harden-runner@' "${workflow}" || true)
 if [ "${harden_runs}" -eq 3 ]; then
