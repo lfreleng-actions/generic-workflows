@@ -171,7 +171,7 @@ in GitHub mode cache in their own scope and keep the default.
 
 ## Network egress
 
-Every job starts with `step-security/harden-runner` v2.22.3, in `block`
+Every job starts with `step-security/harden-runner` v2.22.4, in `block`
 mode unless `harden_runner_egress` is `audit`.
 
 - `gerrit` and `plan` talk to GitHub alone, and allow
@@ -204,7 +204,7 @@ It also fails when the `gerrit` script drifts from
 `change-isolation.yaml`'s, when either leg's credential removal
 drifts from the other's or from `tox-verify.yaml`'s, when a `run:`
 block interpolates an expression, when a harden-runner pin is not
-v2.22.3, when the `Lint` leg's `cache_hooks` stops being `'false'`
+v2.22.4, when the `Lint` leg's `cache_hooks` stops being `'false'`
 in Gerrit mode, and when the example's concurrency group stops being
 one per change or stops queueing in progress. The
 `ci-management-verify-fixtures` prek hook runs it whenever any of the

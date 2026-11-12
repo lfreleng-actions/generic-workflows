@@ -211,7 +211,7 @@ when it ends.
 
 ## Network egress
 
-Both jobs start with `step-security/harden-runner` v2.22.3, in `block`
+Both jobs start with `step-security/harden-runner` v2.22.4, in `block`
 mode unless `harden_runner_egress` is `audit`.
 
 - `plan` talks to GitHub alone, and allows `github.com:443` and
@@ -260,7 +260,7 @@ and runs them offline:
   repository remains.
 
 It also fails when a `run:` block interpolates an expression, when a
-harden-runner pin is not v2.22.3, when `jenkins_password` reaches
+harden-runner pin is not v2.22.4, when `jenkins_password` reaches
 anything but the `jjb-action` input, when the workflow gains a
 `concurrency` block, when the wait runs a git command outside its
 `timeout` helper, and when the job has other than one checkout, of

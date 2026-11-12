@@ -221,8 +221,9 @@ The `gerrit` and `plan` jobs talk to GitHub alone. They run
 harden-runner directly with `github.com:443` and nothing else, as
 `change-isolation.yaml` does.
 
-Every job pins harden-runner v2.22.3, which fixes a DNS bypass on
-`westus2` hosted runners that makes block-mode jobs fail or hang.
+Every job pins harden-runner v2.22.4, which keeps the v2.22.3 fix for
+a DNS bypass on `westus2` hosted runners that makes block-mode jobs
+fail or hang.
 
 ## Pre-build scripts
 
@@ -330,7 +331,7 @@ and a checkout configured with a persisted token. It also extracts the
 it chooses for 2.7 to 4.0 and for versions it cannot compare. It also fails when
 the `gerrit` script drifts from `change-isolation.yaml`'s, when a
 `run:` block interpolates an expression, when a harden-runner pin is
-not v2.22.3, and when the Gerrit example's concurrency group
+not v2.22.4, and when the Gerrit example's concurrency group
 stops being one per change or stops queueing in progress. The
 `tox-verify-fixtures` prek hook runs it whenever either workflow,
 the Gerrit example or the script changes.
