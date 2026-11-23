@@ -4,4 +4,4 @@
 # Read by actions/setup-python through python_version_file in
 # .github/workflows/tox-verify-action.yaml; it skips '#' lines. Not
 # named .python-version, which .gitignore excludes.
-3.10
+3.11
