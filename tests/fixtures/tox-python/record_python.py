@@ -14,7 +14,7 @@ passing leg proves which interpreters it used, not merely that tox ran:
   pythonLocation;
 * TOX_OVERRIDE equals <override>, or is empty when none is given.
 
-Each version is major.minor, such as 3.10.
+Each version is major.minor, such as 3.11.
 """
 
 import os

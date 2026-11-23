@@ -327,8 +327,9 @@ and runs them offline: the refs `master`, `release/1.2` and
 `refs/meta/config`, the rejected `gerrit_branch` forms, accepted and
 rejected `tox_envs`, `parallel`, `path_prefix` and hardening inputs,
 and a checkout configured with a persisted token. It also extracts the
-`Select the tox Python` script and checks which Pythons and override
-it chooses for 2.7 to 4.0 and for versions it cannot compare. It also fails when
+`Select the tox Python` script and checks that it adds no Python and
+no override for 3.11 to 4.0 or when the caller names no Python; its
+handling of older Pythons ships untested. It also fails when
 the `gerrit` script drifts from `change-isolation.yaml`'s, when a
 `run:` block interpolates an expression, when a harden-runner pin is
 not v2.23.0, and when the Gerrit example's concurrency group
@@ -340,10 +341,10 @@ the Gerrit example or the script changes.
 repository's own pull requests, in block mode, against the fixtures in
 `tests/fixtures/tox/` and `tests/fixtures/tox-python/`. One caller asks
 for Python 3.12 and asserts that tox and the environment ran on 3.12
-with no override; two ask for 3.10, through `python_version` and
-`python_version_file`, on `ubuntu-24.04`, and assert that a factorless
-environment and a `py310` environment both ran on 3.10 while tox ran on
-3.13. Each environment calls `tests/fixtures/tox-python/record_python.py`,
+with no override; two ask for 3.11, the organisation's floor, through
+`python_version` and `python_version_file`, and assert that a
+factorless environment and a `py311` environment both ran on 3.11, as
+tox did, with no override. Each environment calls `tests/fixtures/tox-python/record_python.py`,
 which fails unless it ran where the leg expects. A pull request cannot run Gerrit mode, so no
 run here covers a Gerrit checkout, the `refs/meta/config` case
 included, or a real vote; the offline fixtures cover the ref

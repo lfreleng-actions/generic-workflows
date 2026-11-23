@@ -408,9 +408,9 @@ expect_plan_error 'path_prefix space' '["lint"]' 'path_prefix must be' \
 # --- tox Python -----------------------------------------------------
 
 # tox-run-action v1 runs tox on the last Python it sets up, which must
-# be 3.11 or newer. An older requested Python gets TOX_RUNNER_PYTHON
-# listed after it and a default_base_python override back to it; any
-# other value leaves both outputs empty.
+# be 3.11 or newer. 3.11 is also the organisation's minimum, so only
+# requests from 3.11 up, and none at all, are tested: each must leave
+# both outputs empty, with no warning and no job summary.
 
 # run_tox_python <setup-python version>: sets tp_rc, tp_log,
 # tp_versions, tp_override and tp_summary.
@@ -430,48 +430,30 @@ run_tox_python() {
   tp_summary=$(cat "${summary}")
 }
 
-# expect_tox_python <label> <version> <python_versions> <tox_override>
+# expect_tox_python <label> <version>
 expect_tox_python() {
   run_tox_python "$2"
   if [ "${tp_rc}" -ne 0 ]; then
     fail "$1: exit ${tp_rc}, expected 0" "${tp_log}"
-  elif [ "${tp_versions}" != "$3" ]; then
-    fail "$1: python_versions '${tp_versions}', expected '$3'" "${tp_log}"
-  elif [ "${tp_override}" != "$4" ]; then
-    fail "$1: tox_override '${tp_override}', expected '$4'" "${tp_log}"
-  elif [ -n "$3" ] && ! grep -qF '::warning' <<< "${tp_log}"; then
-    fail "$1: no warning for an older Python" "${tp_log}"
-  elif [ -n "$3" ] && ! grep -qF 'end of life' <<< "${tp_summary}"; then
-    fail "$1: no job summary for an older Python" "${tp_summary}"
-  elif [ -z "$3" ] && grep -qF '::warning' <<< "${tp_log}"; then
+  elif [ -n "${tp_versions}" ]; then
+    fail "$1: python_versions '${tp_versions}', expected empty" "${tp_log}"
+  elif [ -n "${tp_override}" ]; then
+    fail "$1: tox_override '${tp_override}', expected empty" "${tp_log}"
+  elif grep -qF '::warning' <<< "${tp_log}"; then
     fail "$1: unexpected warning" "${tp_log}"
-  elif [ -z "$3" ] && [ -n "${tp_summary}" ]; then
+  elif [ -n "${tp_summary}" ]; then
     fail "$1: unexpected job summary" "${tp_summary}"
   else
     pass
   fi
 }
 
-expect_tox_python 'Python 3.12' '3.12.13' '' ''
-expect_tox_python 'Python 3.11' '3.11.0' '' ''
-expect_tox_python 'Python 3.13 major.minor' '3.13' '' ''
-expect_tox_python 'Python 4.0' '4.0.1' '' ''
-expect_tox_python 'Python 3.10' '3.10.19' \
-  "$(printf '3.10.19\n3.13')" 'testenv.default_base_python=python3.10'
-expect_tox_python 'Python 3.8' '3.8.18' \
-  "$(printf '3.8.18\n3.13')" 'testenv.default_base_python=python3.8'
-expect_tox_python 'Python 3.9 major.minor' '3.9' \
-  "$(printf '3.9\n3.13')" 'testenv.default_base_python=python3.9'
-expect_tox_python 'Python 2.7' '2.7.18' \
-  "$(printf '2.7.18\n3.13')" 'testenv.default_base_python=python2.7'
-expect_tox_python 'leading zero minor' '3.09.1' \
-  "$(printf '3.09.1\n3.13')" 'testenv.default_base_python=python3.9'
-# Not a plain CPython version: tox-run-action decides, as before.
-expect_tox_python 'no Python set up' '' '' ''
-expect_tox_python 'PyPy' 'pypy3.9.19' '' ''
-expect_tox_python 'pre-release' '3.10.0-rc.1' '' ''
-expect_tox_python 'free-threaded' '3.10t' '' ''
-expect_tox_python 'workflow command' "$(printf '3.10\n::error::x')" '' ''
+expect_tox_python 'Python 3.12' '3.12.13'
+expect_tox_python 'Python 3.11' '3.11.0'
+expect_tox_python 'Python 3.13 major.minor' '3.13'
+expect_tox_python 'Python 4.0' '4.0.1'
+# No Python requested: tox-run-action decides, as before.
+expect_tox_python 'no Python set up' ''
 
 # --- Checkout credentials -------------------------------------------
 
