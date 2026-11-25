@@ -34,6 +34,7 @@ script_dir="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 workflow="${repo_root}/.github/workflows/linting-verify.yaml"
 linting="${repo_root}/.github/workflows/linting.yaml"
+example="${repo_root}/examples/linting-verify/gerrit-linting-verify.yaml"
 
 for file in "${workflow}" "${linting}"; do
   if [ ! -f "${file}" ]; then
@@ -135,15 +136,11 @@ else
   fail 'a run block interpolates an expression' "${interpolated}"
 fi
 
-# Every harden-runner pin is v2.23.0, which keeps the westus2 DNS
-# bypass fix from v2.22.3, and every job carries one.
-stale_pins=$(grep -n 'step-security/harden-runner@' "${workflow}" |
-  grep -v '@aebdcf6156ab6691adf63218240e476564a1ed4c  # v2.23.0$' ||
-  true)
-if [ -z "${stale_pins}" ]; then
+if python3 -I "${script_dir}/check-harden-runner-pins.py" \
+  "${workflow}" "${linting}" "${example}"; then
   pass
 else
-  fail 'a harden-runner pin is not v2.23.0' "${stale_pins}"
+  fail 'harden-runner pin check failed'
 fi
 harden_runs=$(grep -c 'step-security/harden-runner@' "${workflow}" || true)
 if [ "${harden_runs}" -eq 3 ]; then
@@ -253,17 +250,23 @@ for setup_input in node_setup rust_toolchain_setup; do
   done
 done
 
-# Print the Lint job's steps, one line each, in order.
-lint_steps=$(awk '
+# Print the Lint job's steps in order, identifying harden-runner by
+# action rather than by its display name.
+harden_action='step-security/harden-runner'
+harden_uses="^      (  |- )uses:[[:space:]]+[\"']?${harden_action}@"
+lint_steps=$(awk -v uses="${harden_uses}" -v action="${harden_action}" '
   /^  lint:$/ { inside = 1; next }
   inside && /^  [a-z]/ { inside = 0 }
-  inside && /^      - name:/ { sub(/^ *- name: */, ""); print }
+  inside && /^      - / { sub(/^ *- name: */, ""); steps[++n] = $0 }
+  inside && tolower($0) ~ uses { steps[n] = "uses: " action }
+  END { for (i = 1; i <= n; i++) print steps[i] }
 ' "${workflow}")
 # step_index <name>: the step's position in the Lint job, or 0.
 step_index() {
   grep -nxF -- "'$1'" <<< "${lint_steps}" | cut -d: -f1 | sed -n 1p
 }
-harden_at=$(step_index 'Harden runner')
+harden_at=$(awk -v action="uses: ${harden_action}" \
+  '$0 == action { print NR; exit }' <<< "${lint_steps}")
 gate_at=$(step_index 'Check harden-runner is monitoring')
 gerrit_at=$(step_index 'Checkout Gerrit change')
 github_at=$(step_index 'Checkout repository')
@@ -304,10 +307,16 @@ extra_expected+=" inputs.harden_runner_extra_endpoints) }}"
 # wiring departs from the above; prints nothing when it holds.
 endpoint_wiring() {
   local allowed extra
-  allowed=$(awk '
+  allowed=$(awk -v uses="${harden_uses}" '
     /^  lint:$/ { inside = 1; next }
     inside && /^  [a-z]/ { inside = 0 }
-    inside && /^          allowed-endpoints: >$/ { block = 1; next }
+    inside && /^      - / { harden = 0 }
+    inside && tolower($0) ~ uses { harden = 1 }
+    inside && /^          allowed-endpoints: >$/ {
+      if (!harden) print "not in the harden-runner step"
+      block = 1
+      next
+    }
     block && /^            / { sub(/^ */, ""); print; next }
     block { block = 0 }
   ' "$1")
@@ -1233,7 +1242,6 @@ expect_gate 'not Linux' fail block yes yes RUNNER_OS=Windows
 # it with the rule written out longhand: success only when every
 # result is success, and failure otherwise. It tests the expression's
 # logic, not GitHub's evaluator.
-example="${repo_root}/examples/linting-verify/gerrit-linting-verify.yaml"
 if [ ! -f "${example}" ]; then
   echo "ERROR: example not found: ${example}" >&2
   exit 1

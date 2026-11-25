@@ -33,6 +33,7 @@ isolation="${repo_root}/.github/workflows/change-isolation.yaml"
 tox_verify="${repo_root}/.github/workflows/tox-verify.yaml"
 linting_verify="${repo_root}/.github/workflows/linting-verify.yaml"
 linting="${repo_root}/.github/workflows/linting.yaml"
+example="${repo_root}/examples/ci-management/gerrit-ci-management-verify.yaml"
 
 for file in "${workflow}" "${isolation}" "${tox_verify}" \
   "${linting_verify}" "${linting}"; do
@@ -182,14 +183,12 @@ else
   fail 'a run block interpolates an expression' "${interpolated}"
 fi
 
-# Every harden-runner pin is v2.23.0, which keeps the westus2 DNS
-# bypass fix from v2.22.3, and every job carries one.
-stale_pins=$(grep -n 'step-security/harden-runner@' "${workflow}" |
-  grep -v '@aebdcf6156ab6691adf63218240e476564a1ed4c ' || true)
-if [ -z "${stale_pins}" ]; then
+if python3 -I "${script_dir}/check-harden-runner-pins.py" \
+  "${workflow}" "${isolation}" "${tox_verify}" "${linting_verify}" \
+  "${linting}" "${example}"; then
   pass
 else
-  fail 'a harden-runner pin is not v2.23.0' "${stale_pins}"
+  fail 'harden-runner pin check failed'
 fi
 harden_runs=$(grep -c 'step-security/harden-runner@' "${workflow}" || true)
 if [ "${harden_runs}" -eq 4 ]; then
@@ -586,7 +585,6 @@ done
 group_key='inputs.GERRIT_PROJECT }}-${{ inputs.GERRIT_BRANCH }}-'
 # shellcheck disable=SC2016
 group_key+='${{ inputs.GERRIT_CHANGE_ID || github.run_id }}'
-example="${repo_root}/examples/ci-management/gerrit-ci-management-verify.yaml"
 group_lines=$(grep -cE '^  group: ' "${example}" || true)
 group_template=$(sed -nE 's/^  group: (.*)$/\1/p' "${example}")
 if [ "${group_lines}" -eq 1 ] &&
